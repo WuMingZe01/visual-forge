@@ -1,36 +1,34 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { Save } from 'lucide-react';
 import { useThemeStore } from '@/store/useThemeStore';
 import { useWorkflowStore } from '@/store/useWorkflowStore';
 
 /**
- * InfiniteCanvas — iframe bridge to the standalone canvas app.
+ * InfiniteCanvas — iframe bridge to standalone canvas apps.
+ *
+ * Supports two canvases via URL param `type`:
+ *   /infinite-canvas           → canvas.html      (classic node-graph editor)
+ *   /infinite-canvas?type=smart → smart-canvas.html (smart layout canvas)
  *
  * PostMessage protocol (VF ↔ canvas):
  *   VF → iframe:
- *     {type:'studio-theme', theme:'dark'|'light'}
- *     {type:'studio-lang', lang:'zh'|'en'}
- *     {type:'vf-load-workflow', data: WorkflowDetail}
- *     {type:'vf-load-workflows', data: WorkflowSummary[]}
- *     {type:'vf-open-preset', data: {name, canvas_nodes, canvas_connections}}
- *     {type:'vf-run-task', data: {workflow_name, config}}
- *     {type:'vf-ping'}
+ *     vf-ping, vf-load-workflow, vf-load-workflows, vf-open-preset, vf-run-task,
+ *     vf-request-save, studio-theme, studio-lang
  *
  *   iframe → VF:
- *     {type:'save-workflow', data: {name, nodes, connections, exposed_mapping?}}
- *     {type:'load-workflow', data: {name}}
- *     {type:'load-workflows'}
- *     {type:'run-vf-task', data: {canvas_id, nodes, connections, model_id, width, height}}
- *     {type:'task-result', data: {task_id, status, images, ...}}
- *     {type:'canvas-ready'}
- *     {type:'canvas-updated', canvas_id}
- *     {type:'new-image', data: {url, ...}}
- *     {type:'vf-pong'}
+ *     canvas-ready, vf-pong, save-workflow, load-workflow, load-workflows,
+ *     run-vf-task, task-result, canvas-updated, new-image
  */
 
 const API = '';  // same-origin
 
 export function InfiniteCanvas() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [searchParams] = useSearchParams();
+  const isSmart = searchParams.get('type') === 'smart';
+  const canvasSrc = isSmart ? '/infinite-canvas/smart-canvas.html' : '/infinite-canvas/canvas.html';
+
   const currentTheme = useThemeStore((s) => s.current);
   const isDark = currentTheme !== 'light';
 
@@ -61,7 +59,6 @@ export function InfiniteCanvas() {
   const handleIframeLoad = useCallback(() => {
     setTimeout(() => {
       syncTheme();
-      // Ask canvas to announce readiness
       sendToCanvas({ type: 'vf-ping' });
     }, 300);
   }, [syncTheme, sendToCanvas]);
@@ -76,6 +73,12 @@ export function InfiniteCanvas() {
       .catch(() => { setBackendOk(false); setBackendConnected(false); });
   }, [setBackendConnected]);
 
+  // Save helper: request canvas state then POST to backend
+  const handleSave = useCallback(() => {
+    setStatusText('保存工作流…');
+    sendToCanvas({ type: 'vf-request-save' });
+  }, [sendToCanvas]);
+
   // Main message handler: iframe → VF
   useEffect(() => {
     function handleMessage(event: MessageEvent) {
@@ -87,8 +90,7 @@ export function InfiniteCanvas() {
         case 'canvas-ready':
         case 'vf-pong':
           setCanvasReady(true);
-          setStatusText('画布就绪');
-          // Send pending workflow if one is waiting
+          setStatusText(isSmart ? '智能画布就绪' : '画布就绪');
           if (pendingWorkflow && !pendingSentRef.current) {
             pendingSentRef.current = true;
             const canvasNodes = pendingWorkflow.canvas_nodes || pendingWorkflow.nodes || [];
@@ -106,7 +108,7 @@ export function InfiniteCanvas() {
               });
               setStatusText('已加载工作流: ' + pendingWorkflow.name);
             } else {
-              setStatusText('画布就绪（空模板）');
+              setStatusText(isSmart ? '智能画布就绪（空模板）' : '画布就绪（空模板）');
             }
             clearPendingWorkflow();
           }
@@ -127,7 +129,6 @@ export function InfiniteCanvas() {
               if (data.ok) {
                 setStatusText(`✅ 已保存: ${data.name}`);
                 triggerRefresh();
-                // Notify canvas of success
                 sendToCanvas({ type: 'vf-save-result', data: { ok: true, name: data.name } });
               } else {
                 setStatusText('保存失败');
@@ -175,7 +176,6 @@ export function InfiniteCanvas() {
               if (data.task_id) {
                 setStatusText(`任务已提交: ${data.task_id}`);
                 sendToCanvas({ type: 'vf-task-submitted', data });
-                // Start polling for the result
                 pollTask(data.task_id);
               } else {
                 setStatusText('任务提交失败');
@@ -189,20 +189,17 @@ export function InfiniteCanvas() {
           break;
         }
 
-        // ── Task result from canvas (already processed) ──
         case 'task-result': {
           setLastTaskResult(msg.data);
           setStatusText(`任务完成: ${msg.data?.status || 'unknown'}`);
           break;
         }
 
-        // ── Canvas updated ──
         case 'canvas-updated':
         case 'canvas_updated':
           console.debug('[InfiniteCanvas] canvas_updated:', msg.canvas_id);
           break;
 
-        // ── New image generated ──
         case 'new-image':
           console.debug('[InfiniteCanvas] new_image:', msg.data);
           break;
@@ -214,7 +211,7 @@ export function InfiniteCanvas() {
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [triggerRefresh, setLastTaskResult, setCanvasReady, sendToCanvas, pendingWorkflow, clearPendingWorkflow]);
+  }, [triggerRefresh, setLastTaskResult, setCanvasReady, sendToCanvas, pendingWorkflow, clearPendingWorkflow, isSmart]);
 
   // Poll a pipeline task until completion
   const pollTask = useCallback((taskId: string) => {
@@ -225,7 +222,6 @@ export function InfiniteCanvas() {
         if (task.status === 'completed' || task.status === 'failed') {
           clearInterval(interval);
           setStatusText(task.status === 'completed' ? '✅ 任务完成' : '❌ 任务失败');
-          // Send result back to canvas
           sendToCanvas({ type: 'vf-task-complete', data: task });
           setLastTaskResult(task);
         }
@@ -233,7 +229,6 @@ export function InfiniteCanvas() {
         // keep polling
       }
     }, 2000);
-    // Safety timeout: stop after 10 minutes
     setTimeout(() => clearInterval(interval), 600_000);
   }, [sendToCanvas, setLastTaskResult]);
 
@@ -246,19 +241,28 @@ export function InfiniteCanvas() {
           {backendOk ? '后端已连接' : '后端未连接'}
         </span>
         <span className="opacity-40">|</span>
-        <span>{statusText}</span>
+        <span className="flex-1">{statusText}</span>
+        {/* Smart-canvas save button (classic canvas has its own toolbar button) */}
+        {isSmart && (
+          <button
+            onClick={handleSave}
+            className="flex items-center gap-1 px-3 py-1 rounded-lg bg-gradient-to-r from-forge-cyan to-purple-500 text-white text-xs font-semibold hover:opacity-90 transition-opacity"
+          >
+            <Save size={14} /> 保存为流水线
+          </button>
+        )}
       </div>
       {/* Canvas iframe */}
       <iframe
         ref={iframeRef}
-        src="/infinite-canvas/canvas.html"
+        src={canvasSrc}
         onLoad={handleIframeLoad}
         className="w-full flex-1 border-0 rounded-lg"
         style={{
           background: 'var(--forge-bg, #0a0e1a)',
           minHeight: '600px',
         }}
-        title="无限画布"
+        title={isSmart ? '智能画布' : '无限画布'}
         allow="clipboard-write"
       />
     </div>

@@ -75,6 +75,9 @@ let promptPresets = [];
 let promptPresetDeleteArmed = false;
 let createMenuPoint = {x:0, y:0};
 let nodeClipboard = null;
+// ── VF Workflow Bridge ──
+let exposedMapping = {};
+let vfWorkflowName = '';
 let imageClickTimer = null;
 let suppressImageClickUntil = 0;
 let lastMouseWorld = null;
@@ -8151,10 +8154,51 @@ window.addEventListener('focus', () => {
     if(Date.now() - lastConfigRefreshAt > 1200) refreshSmartConfigFromSettings();
 });
 window.addEventListener('message', event => {
-    if(event.data?.type === 'studio-theme') applyTheme(event.data.theme || 'light');
-    if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed') refreshSmartConfigFromSettings();
-    if(event.data?.type === 'studio-lang' && window.StudioI18n) {
-        window.StudioI18n.set(event.data.lang || 'zh');
+    const msg = event.data;
+    if(!msg?.type) return;
+
+    // ── VF Workflow Bridge ──
+    if(msg.type === 'vf-ping') {
+        try { window.parent.postMessage({type:'canvas-ready'}, '*'); } catch(e){}
+        return;
+    }
+    if(msg.type === 'vf-load-workflow') {
+        const wf = msg.data;
+        if(wf && wf.name) vfWorkflowName = wf.name;
+        if(wf && wf.nodes && wf.nodes.length) {
+            nodes = wf.nodes.map(n => Object.assign({}, n));
+            if(canvas) canvas.connections = wf.connections || [];
+            if(wf.exposed_mapping) {
+                exposedMapping = {};
+                for(const [k, v] of Object.entries(wf.exposed_mapping)) {
+                    exposedMapping[k] = Object.assign({}, v);
+                }
+            }
+            render();
+            console.log('[SmartCanvas] Loaded workflow:', wf.name, '- nodes:', nodes.length, '- exposed:', Object.keys(exposedMapping).length);
+        }
+        return;
+    }
+    if(msg.type === 'vf-request-save') {
+        const payload = {
+            name: vfWorkflowName || canvas?.title || 'Smart Workflow',
+            nodes: nodes.map(n => {
+                const clean = Object.assign({}, n);
+                delete clean.images; delete clean.pending; delete clean.running;
+                return clean;
+            }),
+            connections: canvas?.connections || [],
+            exposed_mapping: Object.keys(exposedMapping).length > 0 ? exposedMapping : undefined,
+        };
+        try { window.parent.postMessage({type:'save-workflow', data: payload}, '*'); } catch(e){}
+        return;
+    }
+
+    // ── Legacy messages ──
+    if(msg.type === 'studio-theme') applyTheme(msg.theme || 'light');
+    if(msg.type === 'providers-changed' || msg.type === 'workflows-changed') refreshSmartConfigFromSettings();
+    if(msg.type === 'studio-lang' && window.StudioI18n) {
+        window.StudioI18n.set(msg.lang || 'zh');
     }
 });
 window.addEventListener('studio-lang-change', () => {
