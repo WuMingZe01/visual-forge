@@ -203,58 +203,71 @@ async def stage_generate(ctx: PipelineContext, config: dict[str, Any] | None = N
             return
 
         async with sem:
-            provider_name = node.get("apiProvider", "auto")
-            provider = get_provider(provider_name)
-
-            # Gather inputs from upstream nodes
-            prompt = ""
-            ref_image = None
-            connections = ctx.runtime_template.get("connections") or ctx.runtime_template.get("canvas_connections") or []
-            for conn in connections:
-                if conn.get("to") == node["id"]:
-                    upstream_output = ctx.node_outputs.get(conn["from"])
-                    if upstream_output:
-                        if upstream_output.node_type == "prompt":
-                            prompt = upstream_output.result or ""
-                        elif upstream_output.node_type == "image":
-                            ref_image = upstream_output.result
-                        elif upstream_output.node_type == "llm":
-                            # LLM output can be used as prompt
-                            if not prompt:
-                                prompt = upstream_output.result or ""
-
-            if not prompt:
-                prompt = DEFAULT_PROMPT
+            node_type = node.get("type", "generator")
 
             try:
-                result = await provider.generate(
-                    prompt=prompt,
-                    ref_image_url=ref_image,
-                    ratio=node.get("ratio", "square"),
-                    resolution=node.get("resolution", "2k"),
-                )
+                # ── ComfyUI path: full workflow JSON → ComfyUI API ──
+                if node_type == "comfy":
+                    provider = get_provider("comfyui")
+                    workflow_json = node.get("workflow_json") or node.get("comfyWorkflowJson") or {}
+                    comfy_name = node.get("comfyWorkflow", "")
+                    if comfy_name and not workflow_json:
+                        try:
+                            import json as _json, os as _os
+                            wf_path = _os.path.join("data", "workflows", f"{comfy_name}.json")
+                            if _os.path.exists(wf_path):
+                                with open(wf_path, "r", encoding="utf-8") as _f:
+                                    workflow_json = _json.load(_f)
+                        except Exception:
+                            pass
+                    result = await provider.generate(
+                        prompt="",
+                        workflow_json=workflow_json,
+                        client_id=f"vf-{node['id']}",
+                    )
+                    logger.info(f"[ComfyUI] Node {node['id']}: success={result.success}, urls={len(result.urls)}")
 
-                async with completed_lock:
-                    completed_count += 1
-                    current = completed_count
+                # ── RunningHub path ──
+                elif node_type == "rh":
+                    provider = get_provider("runninghub")
+                    workflow_id = node.get("workflowId") or node.get("rhWorkflowId", "")
+                    result = await provider.generate(
+                        prompt="",
+                        workflow_id=workflow_id,
+                        workflow_json=node.get("workflow_json") or {},
+                    )
+                    logger.info(f"[RunningHub] Node {node['id']}: success={result.success}, urls={len(result.urls)}")
 
-                ctx.on_progress(PipelineProgress(
-                    stage="generate", step=current, total=total_tasks,
-                    message=f"生图 {current}/{total_tasks}",
-                ))
+                # ── VF standard path (yunwu/grsai) ──
+                else:
+                    provider_name = node.get("apiProvider", "auto")
+                    provider = get_provider(provider_name)
 
-                ctx.node_outputs[node["id"]] = NodeOutput(
-                    node_id=node["id"], node_type="generator",
-                    result=result.urls if result.success else None,
-                    error=result.error if not result.success else None,
-                )
+                    prompt = ""
+                    ref_image = None
+                    connections = ctx.runtime_template.get("connections") or ctx.runtime_template.get("canvas_connections") or []
+                    for conn in connections:
+                        if conn.get("to") == node["id"]:
+                            upstream_output = ctx.node_outputs.get(conn["from"])
+                            if upstream_output:
+                                if upstream_output.node_type == "prompt":
+                                    prompt = upstream_output.result or ""
+                                elif upstream_output.node_type == "image":
+                                    ref_image = upstream_output.result
+                                elif upstream_output.node_type == "llm":
+                                    if not prompt:
+                                        prompt = upstream_output.result or ""
 
-                # Also store in row_results for backward compatibility
-                if result.success and result.urls:
-                    entry = ctx.runtime_template.setdefault("_results", {})
-                    entry.setdefault(node["id"], {"urls": [], "error": ""})
-                    entry[node["id"]]["urls"].extend(result.urls)
-                    ctx.on_row_result(node["id"], result.urls, [])
+                    if not prompt:
+                        prompt = DEFAULT_PROMPT
+
+                    result = await provider.generate(
+                        prompt=prompt,
+                        ref_image_url=ref_image,
+                        ratio=node.get("ratio", "square"),
+                        resolution=node.get("resolution", "2k"),
+                    )
+                    logger.info(f"[VF] Node {node['id']}: success={result.success}, urls={len(result.urls)}")
 
             except Exception as e:
                 if ctx.abort_ref.get("current", False):
@@ -267,7 +280,7 @@ async def stage_generate(ctx: PipelineContext, config: dict[str, Any] | None = N
                 logger.warning(f"Generation failed for node {node['id']}: {err_msg}")
 
                 ctx.node_outputs[node["id"]] = NodeOutput(
-                    node_id=node["id"], node_type="generator",
+                    node_id=node["id"], node_type=node_type,
                     result=None, error=err_msg,
                 )
 

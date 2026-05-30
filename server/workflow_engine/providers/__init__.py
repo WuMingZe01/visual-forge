@@ -13,6 +13,8 @@ from .yunwu import YunwuProvider
 from .grsai import GrsAIProvider
 from .mimo import MiMoProvider
 from .llm import LLMProvider
+from .comfyui import ComfyUIProvider
+from .runninghub import RunningHubProvider
 from .key_pool import (
     KeyPool,
     KeyState,
@@ -33,11 +35,13 @@ _yunwu: YunwuProvider | None = None
 _grsai: GrsAIProvider | None = None
 _mimo: MiMoProvider | None = None
 _llm: LLMProvider | None = None
+_comfyui: ComfyUIProvider | None = None
+_runninghub: RunningHubProvider | None = None
 
 
 def get_provider(name: str) -> BaseProvider:
     """Get a provider instance by name."""
-    global _yunwu, _grsai, _mimo, _llm
+    global _yunwu, _grsai, _mimo, _llm, _comfyui, _runninghub
 
     name_lower = name.lower().strip()
 
@@ -61,6 +65,16 @@ def get_provider(name: str) -> BaseProvider:
             _llm = LLMProvider()
         return _llm
 
+    if name_lower in ("comfyui", "comfy"):
+        if _comfyui is None:
+            _comfyui = ComfyUIProvider()
+        return _comfyui
+
+    if name_lower in ("runninghub", "rh"):
+        if _runninghub is None:
+            _runninghub = RunningHubProvider()
+        return _runninghub
+
     # Default to Yunwu
     if _yunwu is None:
         _yunwu = YunwuProvider()
@@ -73,6 +87,10 @@ PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
     "grsai": GrsAIProvider,
     "mimo": MiMoProvider,
     "llm": LLMProvider,
+    "comfyui": ComfyUIProvider,
+    "comfy": ComfyUIProvider,
+    "runninghub": RunningHubProvider,
+    "rh": RunningHubProvider,
     "auto": YunwuProvider,
 }
 
@@ -101,6 +119,8 @@ __all__ = [
     "GrsAIProvider",
     "MiMoProvider",
     "LLMProvider",
+    "ComfyUIProvider",
+    "RunningHubProvider",
     "KeyPool",
     "KeyState",
     "KeyStats",
