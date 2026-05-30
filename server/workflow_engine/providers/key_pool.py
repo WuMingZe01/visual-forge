@@ -165,3 +165,55 @@ def available_key_count(provider: str) -> int:
     """Count available (non-open-circuit) keys."""
     pool = _pool_for(provider)
     return len([k for k in pool.keys if k.circuit_state != "open" and k.key.strip()])
+
+
+def acquire_key(pool: KeyPool) -> str:
+    """Acquire an available key from the pool. Picks the least-recently-used
+    key that is not in open circuit state and has capacity."""
+    import random
+    available = [
+        k for k in pool.keys
+        if k.circuit_state != "open" and k.key.strip() and k.in_use < k.max_concurrent
+    ]
+    if not available:
+        # Fallback: pick any non-open key even if at capacity
+        available = [k for k in pool.keys if k.circuit_state != "open" and k.key.strip()]
+    if not available:
+        raise RuntimeError(f"No available keys for provider '{pool.provider}'")
+    # Prefer half-open keys for testing, then least-recently-used
+    half_open = [k for k in available if k.circuit_state == "half-open"]
+    if half_open:
+        chosen = half_open[0]
+    else:
+        # Sort by last_used (oldest first) with some randomization
+        available.sort(key=lambda k: k.last_used)
+        top = available[:min(3, len(available))]
+        chosen = random.choice(top)
+    chosen.in_use += 1
+    chosen.last_used = time.time()
+    return chosen.key
+
+
+def release_key(pool: KeyPool, key: str, success: bool) -> None:
+    """Release a key after use. Update circuit breaker state on failure."""
+    for ks in pool.keys:
+        if ks.key == key:
+            ks.in_use = max(0, ks.in_use - 1)
+            if success:
+                ks.stats.success_count += 1
+                ks.stats.consecutive_fails = 0
+                if ks.circuit_state == "half-open":
+                    ks.circuit_state = "closed"
+            else:
+                ks.stats.fail_count += 1
+                ks.stats.consecutive_fails += 1
+                ks.stats.last_fail_time = time.time()
+                if ks.stats.consecutive_fails >= CIRCUIT_BREAKER_THRESHOLD:
+                    ks.circuit_state = "open"
+                    ks.circuit_opened_at = time.time()
+                    backoff = min(
+                        CIRCUIT_BASE_BACKOFF * (2 ** (ks.stats.consecutive_fails - CIRCUIT_BREAKER_THRESHOLD)),
+                        CIRCUIT_MAX_BACKOFF,
+                    )
+                    ks.circuit_retry_after = int(backoff)
+            break

@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from .base import BaseProvider, ProviderResult
-from .key_pool import KeyPool, KeyState, merge_pool
+from .key_pool import KeyPool, KeyState, merge_pool, acquire_key, release_key, _pool_for
 
 logger = logging.getLogger(__name__)
 
@@ -283,6 +283,21 @@ async def _yunwu_edits(api_key: str, input_data: dict[str, Any]) -> str:
 
 
 # ============================================================================
+# Dimension Resolution (FIX #8)
+# ============================================================================
+
+def _resolve_dimensions(ratio: str, resolution: str) -> tuple[int, int]:
+    """Convert ratio+resolution to concrete width/height."""
+    base = {"1k": 1024, "2k": 2048, "4k": 4096}.get(resolution, 2048)
+    ratios = {
+        "square": (base, base),
+        "portrait": (int(base * 0.75), base),
+        "landscape": (base, int(base * 0.75)),
+    }
+    return ratios.get(ratio, (base, base))
+
+
+# ============================================================================
 # Provider Class
 # ============================================================================
 
@@ -299,26 +314,33 @@ class YunwuProvider(BaseProvider):
     ) -> ProviderResult:
         """Generate an image using Yunwu."""
         _sync_pool()
+        pool = _pool_for("yunwu")
+
+        # Convert ratio/resolution to width/height if not explicitly provided
+        w, h = _resolve_dimensions(ratio, resolution)
 
         model_id = kwargs.get("model_id", "gpt-image-2-all")
         input_data = {
             "prompt": prompt,
             "modelId": model_id,
-            "width": kwargs.get("width", DEFAULT_WIDTH),
-            "height": kwargs.get("height", DEFAULT_HEIGHT),
+            "width": kwargs.get("width") or w,
+            "height": kwargs.get("height") or h,
             "modelImageBase64": kwargs.get("model_image_b64", ""),
             "productImageBase64": kwargs.get("product_image_b64", ""),
             "styleRefBase64": kwargs.get("style_ref_b64", ""),
             "detailImageBase64": kwargs.get("detail_b64", ""),
         }
 
+        key = acquire_key(pool)
         try:
             if model_id == "gpt-image-2-all":
-                url = await _yunwu_edits("", input_data)
+                url = await _yunwu_edits(key, input_data)
             else:
-                url = await _yunwu_generate("", input_data)
+                url = await _yunwu_generate(key, input_data)
+            release_key(pool, key, success=True)
             return ProviderResult(success=True, urls=[url])
         except Exception as e:
+            release_key(pool, key, success=False)
             return ProviderResult(success=False, error=str(e))
 
     async def health_check(self) -> bool:

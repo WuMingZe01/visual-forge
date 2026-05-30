@@ -58,6 +58,20 @@ class WorkflowTask:
         return 0.0
     
     def to_dict(self) -> Dict[str, Any]:
+        result_data = None
+        if self.result:
+            result_data = self.result
+        elif self.context and hasattr(self.context, 'node_outputs'):
+            # Extract results from node_outputs
+            final = self.context.node_outputs.get('__final__')
+            if final:
+                result_data = {"urls": final.result if isinstance(final.result, list) else [final.result]}
+
+        has_result = self.result is not None
+        if not has_result and self.context and hasattr(self.context, 'node_outputs'):
+            final = self.context.node_outputs.get('__final__')
+            has_result = final is not None and final.result is not None
+
         return {
             "task_id": self.task_id,
             "workflow_name": self.workflow_name,
@@ -67,7 +81,9 @@ class WorkflowTask:
             "completed_at": datetime.fromtimestamp(self.completed_at).isoformat() if self.completed_at else None,
             "duration_seconds": round(self.duration_seconds, 1),
             "error": self.error,
-            "has_result": self.result is not None,
+            "has_result": has_result,
+            "result": result_data,
+            "enabled_stages": [s.id for s in self.workflow_config.stages if s.enabled] if self.workflow_config else [],
         }
 
 
@@ -125,7 +141,32 @@ class WorkflowExecutor:
                 engine = PipelineEngine(task.workflow_config, task.context)
                 await engine.run()
                 
-                task.status = TaskStatus.COMPLETED
+                # Check if all generation nodes failed (W1)
+                all_gen_failed = False
+                gen_nodes_found = False
+                for nid, output in task.context.node_outputs.items():
+                    if nid.startswith("__"):
+                        continue
+                    if output.node_type == "generator":
+                        gen_nodes_found = True
+                        if output.result is not None:
+                            all_gen_failed = False
+                            break
+                        # If we only have generators and none succeeded
+                if gen_nodes_found:
+                    any_gen_success = any(
+                        output.result is not None
+                        for nid, output in task.context.node_outputs.items()
+                        if not nid.startswith("__") and output.node_type == "generator"
+                    )
+                    if not any_gen_success:
+                        all_gen_failed = True
+
+                if all_gen_failed:
+                    task.status = TaskStatus.FAILED
+                    task.error = "所有生成节点均失败"
+                else:
+                    task.status = TaskStatus.COMPLETED
                 # Extract results from node_outputs (new architecture)
                 # Also check runtime_template._results for backward compatibility
                 results = {}

@@ -30,10 +30,10 @@ logger = logging.getLogger(__name__)
 MIMO_BASE_URL = "https://api.xiaomimimo.com/v1/chat/completions"
 MIMO_MODEL = "mimo-v2.5"
 MIMO_API_KEYS: list[str] = [
-    "sk-ceqaykkja91qsnxxane5qomonzfmyog3lquha9xwgfptgyk7",   # [0] 备用
-    "sk-czccdxw9653nfx2fmm1p023ctpi1wv0i6jqfxpvdshr7c2tn",   # [1] 优先
-    "sk-cwx4vo7mzp8rwx0sqysn2xbw1gt3dmyt3gwkzc3aoxayg7b8",   # [2] 优先
-    "sk-c9fjclbpqr16jy5x4wnl7vmer6f6k2et81mdanne41mdg32l",   # [3] 优先
+    os.getenv("MIMO_API_KEY_1", "sk-ceqaykkja91qsnxxane5qomonzfmyog3lquha9xwgfptgyk7"),   # [0] 备用
+    os.getenv("MIMO_API_KEY_2", "sk-czccdxw9653nfx2fmm1p023ctpi1wv0i6jqfxpvdshr7c2tn"),   # [1] 优先
+    os.getenv("MIMO_API_KEY_3", "sk-cwx4vo7mzp8rwx0sqysn2xbw1gt3dmyt3gwkzc3aoxayg7b8"),   # [2] 优先
+    os.getenv("MIMO_API_KEY_4", "sk-c9fjclbpqr16jy5x4wnl7vmer6f6k2et81mdanne41mdg32l"),   # [3] 优先
 ]
 MIMO_MAX_TOKENS = 4096
 MIMO_TIMEOUT = 120.0
@@ -56,12 +56,19 @@ def _sync_pool() -> None:
 # ============================================================================
 
 async def _acquire_mimo_key() -> str:
-    """Select next MiMo key, preferring keys at indices 1,2,3, falling back to 0."""
+    """Select next MiMo key using round-robin rotation, preferring keys at indices 1,2,3, falling back to 0."""
     global _mimo_key_index
     preferred_order = [1, 2, 3, 0]
-    for idx in preferred_order:
+    # Find current position in preferred order and advance
+    try:
+        current_pos = preferred_order.index(_mimo_key_index)
+    except ValueError:
+        current_pos = -1
+    # Try keys starting from next position after current
+    for offset in range(len(preferred_order)):
+        idx = preferred_order[(current_pos + 1 + offset) % len(preferred_order)]
         key = MIMO_API_KEYS[idx]
-        if key.strip():
+        if key and key.strip():
             _mimo_key_index = idx
             return key
     raise RuntimeError("No MiMo API keys configured")

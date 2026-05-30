@@ -73,4 +73,12 @@ class WorkflowConfig:
 # These are no longer used by the engine but may be imported elsewhere
 RowImages = None
 TemplateSlot = None
-WorkflowOptions = None
+
+
+@dataclass
+class WorkflowOptions:
+    """Workflow execution options."""
+    generate_concurrency: int = 4
+    generate_timeout_ms: int = 300_000
+    validate_timeout_ms: int = 30_000
+    llm_max_concurrency: int = 4

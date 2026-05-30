@@ -6718,6 +6718,7 @@ async def ws_pipeline_progress(websocket: WebSocket, task_id: str):
 
 def _list_saved_workflows():
     """扫描 data/workflows/ 目录，返回画布保存的工作流模板列表"""
+    from workflow_engine.injector import get_exposed_fields
     wf_dir = os.path.join(DATA_DIR, "workflows")
     if not os.path.isdir(wf_dir):
         return []
@@ -6729,9 +6730,8 @@ def _list_saved_workflows():
         try:
             with open(fpath, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            canvas_nodes = data.get("source_canvas_nodes", [])
-            canvas_connections = data.get("source_canvas_connections", [])
-            generator_config = _extract_generator_config(canvas_nodes)
+            canvas_nodes = data.get("canvas_nodes") or data.get("source_canvas_nodes") or []
+            canvas_connections = data.get("canvas_connections") or data.get("source_canvas_connections") or []
             results.append({
                 "name": data.get("name", fname.replace(".json", "")),
                 "source": "canvas",
@@ -6741,9 +6741,10 @@ def _list_saved_workflows():
                 "connection_count": len(canvas_connections),
                 "file": fname,
                 "modified_at": int(os.path.getmtime(fpath) * 1000),
-                "generator_config": generator_config,
                 "canvas_nodes": canvas_nodes,
                 "canvas_connections": canvas_connections,
+                "exposed_mapping": data.get("exposed_mapping", {}),
+                "exposed_fields": get_exposed_fields(data),
             })
         except Exception:
             continue
@@ -6806,6 +6807,7 @@ def get_workflow_detail(name: str):
     # 再查画布保存的
     data = _get_saved_workflow(name)
     if data:
+        from workflow_engine.injector import get_exposed_fields
         return {
             "name": data.get("name", name),
             "source": "canvas",
@@ -6814,6 +6816,8 @@ def get_workflow_detail(name: str):
             "options": data.get("options", {}),
             "nodes": data.get("source_canvas_nodes", []),
             "connections": data.get("source_canvas_connections", []),
+            "exposed_mapping": data.get("exposed_mapping", {}),
+            "exposed_fields": get_exposed_fields(data),
         }
     raise HTTPException(status_code=404, detail=f"工作流不存在: {name}")
 
@@ -6919,73 +6923,12 @@ class WorkflowRunRequest(BaseModel):
     count: int = 1
 
 
-def _extract_generator_config(nodes: list) -> dict:
-    """从画布节点中提取生成器配置（provider、model、size 等）"""
-    for node in nodes:
-        ntype = node.get("type", "")
-        if ntype in ("generator", "msgen", "comfy", "rh"):
-            config = {}
-            if node.get("apiProvider"):
-                config["provider_id"] = node["apiProvider"]
-            if node.get("model"):
-                config["model"] = node["model"]
-            if node.get("msCustomModel"):
-                config["model"] = node["msCustomModel"]
-            if node.get("ratio"):
-                config["ratio"] = node["ratio"]
-            if node.get("resolution"):
-                config["resolution"] = node["resolution"]
-            if node.get("customWidth"):
-                config["width"] = node["customWidth"]
-            if node.get("customHeight"):
-                config["height"] = node["customHeight"]
-            if node.get("count"):
-                config["count"] = node["count"]
-            if node.get("rhMode"):
-                config["rh_mode"] = node["rhMode"]
-            if node.get("webappId"):
-                config["webapp_id"] = node["webappId"]
-            if node.get("workflowId"):
-                config["workflow_id"] = node["workflowId"]
-            return config
-    return {}
 
-
-def _extract_llm_config(nodes: list) -> dict:
-    """从画布节点中提取 LLM 配置"""
-    for node in nodes:
-        if node.get("type") == "llm":
-            config = {}
-            if node.get("model"):
-                config["model"] = node["model"]
-            if node.get("systemPrompt"):
-                config["system_prompt"] = node["systemPrompt"]
-            return config
-    return {}
-
-
-def _extract_prompt_texts(nodes: list, connections: list) -> str:
-    """从画布节点中提取提示词文本（找到连接到生成器的 prompt 节点）"""
-    # 找到生成器节点
-    gen_ids = {n["id"] for n in nodes if n.get("type") in ("generator", "msgen", "comfy", "rh")}
-    # 找到连接到生成器的 prompt 节点
-    prompt_node_ids = set()
-    for conn in connections:
-        if conn.get("to") in gen_ids:
-            prompt_node_ids.add(conn.get("from"))
-    # 收集 prompt 文本
-    texts = []
-    for node in nodes:
-        if node.get("id") in prompt_node_ids and node.get("type") == "prompt":
-            text = node.get("text", "")
-            if text:
-                texts.append(text)
-    return "\n\n".join(texts)
 
 
 @app.post("/api/vf/workflows/{name}/run")
 async def run_workflow_template(name: str, request: Request):
-    """运行指定的工作流模板"""
+    """运行指定的工作流模板 — 纯透传，不解析节点"""
     from workflow_engine.types import PipelineContext, WorkflowConfig, StageConfig
     from workflow_engine.injector import inject_parameters, InjectionError
 
@@ -6994,102 +6937,53 @@ async def run_workflow_template(name: str, request: Request):
     except Exception:
         body = {}
 
-    req = WorkflowRunRequest(**body) if body else WorkflowRunRequest()
+    # 1. 获取模板
+    template = WORKFLOW_PRESETS.get(name)
+    if not template:
+        template = _get_saved_workflow(name)
+    if not template:
+        raise HTTPException(status_code=404, detail=f"工作流不存在: {name}")
 
-    # 查找模板
-    preset = WORKFLOW_PRESETS.get(name)
-    if preset:
-        stages_data = preset.get("stages", [])
-        opts = preset.get("options", {})
-        wf_name = preset.get("name", name)
-        canvas_nodes = list(preset.get("canvas_nodes", []))
-        canvas_connections = list(preset.get("canvas_connections", []))
-    else:
-        saved = _get_saved_workflow(name)
-        if not saved:
-            raise HTTPException(status_code=404, detail=f"工作流不存在: {name}")
-        stages_data = saved.get("stages", [])
-        opts = saved.get("options", {})
-        wf_name = saved.get("name", name)
-        canvas_nodes = saved.get("source_canvas_nodes", [])
-        canvas_connections = saved.get("source_canvas_connections", [])
+    # 2. 从请求体提取 dynamic_inputs（兼容旧格式：把 product_image_url 等转为 dynamic_inputs）
+    dynamic_inputs = body.get("dynamic_inputs", {})
+    # 旧格式兼容：如果传了 product_image_url 但没有 dynamic_inputs，自动转换
+    if not dynamic_inputs:
+        if body.get("product_image_url"):
+            dynamic_inputs["product_image"] = body["product_image_url"]
+        if body.get("prompt"):
+            dynamic_inputs["user_prompt"] = body["prompt"]
 
-    # 从画布节点中提取生成器配置（provider、model、size）
-    generator_config = _extract_generator_config(canvas_nodes)
-    llm_config = _extract_llm_config(canvas_nodes)
-    prompt_texts = _extract_prompt_texts(canvas_nodes, canvas_connections)
+    # 3. 参数注入
+    try:
+        runtime = inject_parameters(template, dynamic_inputs)
+    except InjectionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    # 构造 rows：优先用传入的 rows，否则从单图参数构造
-    rows = req.rows
-    if not rows and req.product_image_url:
-        row = {
-            "id": "single_0",
-            "product_image_url": req.product_image_url,
-            "model_image_url": req.model_image_url,
-            "style_ref_url": req.style_ref_url,
-            "prompt": req.prompt or prompt_texts,
-            "count": req.count,
-        }
-        # 注入画布节点的生成器配置
-        if generator_config:
-            row["generator_config"] = generator_config
-        rows = [row]
-    elif rows:
-        # 给每行注入画布配置
-        for row in rows:
-            if generator_config:
-                row.setdefault("generator_config", generator_config)
-            if prompt_texts and not row.get("prompt"):
-                row["prompt"] = prompt_texts
-    if not rows:
-        raise HTTPException(status_code=400, detail="需要提供 rows 或 product_image_url")
-
-    # Inject image URLs into canvas_nodes for the runtime template
-    runtime_nodes = list(canvas_nodes) if canvas_nodes else []
-    if rows and runtime_nodes:
-        # Inject first row's image into first image node
-        first_row = rows[0] if isinstance(rows, list) else {}
-        for node in runtime_nodes:
-            if node.get("type") == "image":
-                img_url = first_row.get("product_image_url") or first_row.get("image_url") or ""
-                if img_url and not node.get("url"):
-                    node["url"] = img_url
-                break
-
-    # 构造 WorkflowConfig
-    wf_stages = [StageConfig(id=s["id"], enabled=s.get("enabled", True), config=s.get("config")) for s in stages_data]
-    wf_config = WorkflowConfig(
-        name=wf_name,
-        description=f"从模板 [{wf_name}] 运行",
-        stages=wf_stages,
+    # 4. 构建上下文 → 提交执行
+    stages_data = template.get("stages", [])
+    opts = template.get("options", {})
+    config = WorkflowConfig(
+        name=template.get("name", name),
+        description=template.get("description", ""),
+        stages=[StageConfig(id=s["id"], enabled=s.get("enabled", True), config=s.get("config")) for s in stages_data],
         options=opts,
     )
-
-    # Build runtime template
-    runtime_template = {
-        "nodes": runtime_nodes,
-        "connections": canvas_connections,
-        "canvas_nodes": runtime_nodes,
-        "canvas_connections": canvas_connections,
-    }
-
     ctx = PipelineContext(
-        runtime_template=runtime_template,
-        dynamic_inputs={},
+        runtime_template=runtime,
+        dynamic_inputs=dynamic_inputs,
         generate_concurrency=opts.get("generateConcurrency", 4),
         generate_timeout_ms=opts.get("generateTimeoutMs", 480000),
         validate_timeout_ms=opts.get("validateTimeoutMs", 30000),
     )
 
     executor = get_executor(max_concurrent=5)
-    task = await executor.submit(wf_name, wf_config, ctx)
+    task = await executor.submit(config.name, config, ctx)
 
     return {
         "task_id": task.task_id,
-        "workflow_name": wf_name,
+        "workflow_name": config.name,
         "status": task.status.value,
-        "row_count": len(rows),
-        "enabled_stages": [s["id"] for s in stages_data if s.get("enabled", True)],
+        "injected_fields": list(dynamic_inputs.keys()),
     }
 
 
@@ -7099,7 +6993,7 @@ async def run_workflow_template(name: str, request: Request):
 
 @app.post("/api/vf/workflows/save")
 async def save_pipeline_template(request: Request):
-    """从画布保存流水线模板"""
+    """从画布保存流水线模板 — 纯存储，不解析节点"""
     try:
         body = await request.json()
     except Exception:
@@ -7108,59 +7002,47 @@ async def save_pipeline_template(request: Request):
     name = body.get("name", "未命名流水线").strip()
     nodes = body.get("nodes", [])
     connections = body.get("connections", [])
+    exposed_mapping = body.get("exposed_mapping", {})
 
     if not name:
         raise HTTPException(status_code=400, detail="流水线名称不能为空")
 
-    # Map canvas node types to pipeline stages
-    stage_ids = []
-    for node in nodes:
-        ntype = node.get("type", "")
-        stage = _map_canvas_node_to_stage(ntype)
-        if stage:
-            stage_ids.append(stage)
-
-    # Deduplicate and order
-    stage_order = ["prepare", "analyze", "generate", "validate", "finalize"]
-    enabled_stages = list(dict.fromkeys([s for s in stage_order if s in stage_ids]))
-
+    # 纯透传存储，不解析任何节点类型
     template = {
         "name": name,
-        "description": f"从画布导出的流水线模板 ({len(nodes)} 节点)",
-        "stages": [{"id": s, "enabled": True} for s in enabled_stages],
-        "options": {
+        "description": body.get("description", f"画布模板 ({len(nodes)} 节点)"),
+        "stages": body.get("stages", [
+            {"id": "prepare", "enabled": True},
+            {"id": "analyze", "enabled": True},
+            {"id": "generate", "enabled": True},
+            {"id": "validate", "enabled": True},
+            {"id": "finalize", "enabled": True},
+        ]),
+        "options": body.get("options", {
             "generateConcurrency": 36,
             "generateTimeoutMs": 480000,
             "validateTimeoutMs": 30000,
             "llmMaxConcurrency": 3,
-        },
-        "source_canvas_nodes": nodes,
-        "source_canvas_connections": connections,
+        }),
+        "canvas_nodes": nodes,
+        "canvas_connections": connections,
+        "exposed_mapping": exposed_mapping,
     }
 
-    # Save to workflows directory
     safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in name)
     save_path = os.path.join(DATA_DIR, "workflows", f"{safe_name}.json")
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     with open(save_path, "w", encoding="utf-8") as f:
         json.dump(template, f, ensure_ascii=False, indent=2)
 
-    return {"ok": True, "name": safe_name, "path": save_path, "enabled_stages": enabled_stages}
-
-
-class CanvasPipelineRunRequest(BaseModel):
-    canvas_id: str = ""
-    nodes: list = []
-    connections: list = []
-    model_id: str = "gpt-image-2-vip"
-    width: int = 1024
-    height: int = 1024
+    return {"ok": True, "name": safe_name, "path": save_path}
 
 
 @app.post("/api/vf/workflows/run-from-canvas")
 async def run_pipeline_from_canvas(request: Request):
-    """从画布节点直接运行流水线（不需先保存模板）"""
-    from workflow_engine.types import PipelineContext, WorkflowConfig, StageConfig, WorkflowOptions
+    """从画布直接运行 — 把画布 JSON 当模板，纯透传"""
+    from workflow_engine.types import PipelineContext, WorkflowConfig, StageConfig
+    from workflow_engine.injector import inject_parameters
 
     try:
         body = await request.json()
@@ -7169,102 +7051,38 @@ async def run_pipeline_from_canvas(request: Request):
 
     nodes = body.get("nodes", [])
     connections = body.get("connections", [])
-    canvas_id = body.get("canvas_id", "")
-    model_id = body.get("model_id", "gpt-image-2-vip")
-    width = body.get("width", 1024)
-    height = body.get("height", 1024)
+    dynamic_inputs = body.get("dynamic_inputs", {})
 
     if not nodes:
         raise HTTPException(status_code=400, detail="画布没有节点")
 
-    # Map canvas nodes to pipeline stages
-    stage_ids = []
-    for node in nodes:
-        ntype = node.get("type", "")
-        stage = _map_canvas_node_to_stage(ntype)
-        if stage:
-            stage_ids.append(stage)
+    # 画布 JSON 本身就是模板
+    template = {
+        "name": body.get("name", f"canvas-{body.get('canvas_id', 'ad-hoc')}"),
+        "description": f"画布直接运行 ({len(nodes)} 节点)",
+        "stages": [
+            {"id": "prepare", "enabled": True},
+            {"id": "generate", "enabled": True},
+            {"id": "finalize", "enabled": True},
+        ],
+        "options": {"generateConcurrency": 4, "generateTimeoutMs": 480000},
+        "canvas_nodes": nodes,
+        "canvas_connections": connections,
+    }
 
-    # Deduplicate and order
-    stage_order = ["prepare", "analyze", "generate", "validate", "finalize"]
-    enabled_stages = list(dict.fromkeys([s for s in stage_order if s in stage_ids]))
+    runtime = inject_parameters(template, dynamic_inputs)
 
-    if not enabled_stages:
-        raise HTTPException(status_code=400, detail="画布节点无法映射到任何流水线阶段")
-
-    wf_config = WorkflowConfig(
-        name=f"画布流水线-{canvas_id or 'ad-hoc'}",
-        description=f"从画布直接运行 ({len(nodes)} 节点, 阶段: {' → '.join(enabled_stages)})",
-        stages=[StageConfig(id=s, enabled=True) for s in enabled_stages],
-        options=WorkflowOptions(
-            generate_concurrency=4,
-            generate_timeout_ms=480000,
-            validate_timeout_ms=30000,
-            llm_max_concurrency=3,
-        ),
+    config = WorkflowConfig(
+        name=template["name"],
+        description=template["description"],
+        stages=[StageConfig(id=s["id"], enabled=True) for s in template["stages"]],
     )
-
-    # Build rows from canvas node data (image nodes become row inputs)
-    rows = []
-    image_nodes = [n for n in nodes if n.get("type") == "image"]
-    for img_node in image_nodes:
-        row = {
-            "id": img_node.get("id", ""),
-            "image_url": img_node.get("src", "") or img_node.get("url", ""),
-            "prompt": "",
-        }
-        # Find connected prompt nodes
-        for conn in connections:
-            if conn.get("from") == img_node.get("id"):
-                target = next((n for n in nodes if n.get("id") == conn.get("to")), None)
-                if target and target.get("type") in ("prompt", "llm"):
-                    row["prompt"] = target.get("text", "") or target.get("prompt", "")
-        rows.append(row)
-
-    ctx = PipelineContext(
-        rows=rows,
-        model_id=model_id,
-        width=width,
-        height=height,
-        has_lingmao_data=False,
-        use_hybrid=True,
-    )
+    ctx = PipelineContext(runtime_template=runtime, dynamic_inputs=dynamic_inputs)
 
     executor = get_executor(max_concurrent=5)
-    task = await executor.submit(f"canvas-{canvas_id or 'ad-hoc'}", wf_config, ctx)
+    task = await executor.submit(config.name, config, ctx)
 
-    return {
-        "task_id": task.task_id,
-        "status": task.status.value,
-        "enabled_stages": enabled_stages,
-        "row_count": len(rows),
-    }
-
-
-def _map_canvas_node_to_stage(ntype: str) -> str:
-    """映射画布节点类型到流水线阶段"""
-    mapping = {
-        # 资产输入
-        "image": "prepare",
-        # AI 处理
-        "prompt": "analyze",
-        "llm": "analyze",
-        # 生成
-        "generator": "generate",
-        "msgen": "generate",
-        "msgenerate": "generate",
-        "comfy": "generate",
-        "comfyui": "generate",
-        "rh": "generate",
-        "video": "generate",
-        "ltxDirector": "generate",
-        # 控制流（不映射到阶段）
-        "loop": "",
-        "group": "",
-        # 输出
-        "output": "finalize",
-    }
-    return mapping.get(ntype, "")
+    return {"task_id": task.task_id, "status": task.status.value}
 
 
 if __name__ == "__main__":
