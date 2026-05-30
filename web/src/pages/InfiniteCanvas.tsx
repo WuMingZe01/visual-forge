@@ -16,7 +16,7 @@ import { useWorkflowStore } from '@/store/useWorkflowStore';
  *     {type:'vf-ping'}
  *
  *   iframe → VF:
- *     {type:'save-workflow', data: {name, nodes, connections}}
+ *     {type:'save-workflow', data: {name, nodes, connections, exposed_mapping?}}
  *     {type:'load-workflow', data: {name}}
  *     {type:'load-workflows'}
  *     {type:'run-vf-task', data: {canvas_id, nodes, connections, model_id, width, height}}
@@ -99,6 +99,7 @@ export function InfiniteCanvas() {
                   name: pendingWorkflow.name,
                   nodes: pendingWorkflow.canvas_nodes || pendingWorkflow.nodes || [],
                   connections: pendingWorkflow.canvas_connections || pendingWorkflow.connections || [],
+                  exposed_mapping: pendingWorkflow.exposed_mapping || {},
                 }
               });
               setStatusText('已加载工作流: ' + pendingWorkflow.name);
@@ -109,13 +110,13 @@ export function InfiniteCanvas() {
 
         // ── Save workflow from canvas ──
         case 'save-workflow': {
-          const { name, nodes, connections } = msg.data || {};
+          const { name, nodes, connections, exposed_mapping } = msg.data || {};
           if (!name) break;
           setStatusText('保存工作流…');
           fetch(`${API}/api/vf/workflows/save`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, nodes, connections }),
+            body: JSON.stringify({ name, nodes, connections, exposed_mapping }),
           })
             .then(r => r.json())
             .then(data => {

@@ -49,6 +49,7 @@
                     <button class="tool-btn" onclick="addLTXDirectorNode()"><i data-lucide="film" class="w-4 h-4"></i><span data-i18n="canvas.ltxDirector">LTX Director</span></button>
                     <button class="tool-btn" onclick="addOutputNode()"><i data-lucide="circle-dot" class="w-4 h-4"></i>Output</button>
                     <button class="tool-btn" onclick="groupSelectedImages()"><i data-lucide="group" class="w-4 h-4"></i><span data-i18n="canvas.group">分组</span></button>
+                    <button class="tool-btn" onclick="openExposedParamsPanel()" style="background:linear-gradient(135deg,#f59e0b,#ef4444);color:#fff"><i data-lucide="zap" class="w-4 h-4"></i><span>暴露参数</span></button>
                     <button class="tool-btn" onclick="saveAsPipelineTemplate()" style="background:linear-gradient(135deg,#06b6d4,#8b5cf6);color:#fff"><i data-lucide="layers" class="w-4 h-4"></i><span>保存为流水线</span></button>
                 </div>
                 <div class="toolbar-fixed">
@@ -259,6 +260,21 @@
                 <div class="error-actions">
                     <button class="error-btn" type="button" onclick="copyErrorMessage()"><i data-lucide="copy" class="w-4 h-4"></i><span>复制</span></button>
                     <button class="error-btn primary" type="button" onclick="closeErrorModal()">关闭</button>
+                </div>
+            </div>
+        </div>
+        <!-- 暴露参数面板 -->
+        <div id="exposedParamsModal" class="exposed-params-modal" onclick="closeExposedParamsPanel()">
+            <div class="exposed-params-panel" onclick="event.stopPropagation()">
+                <div class="exposed-params-head">
+                    <div class="exposed-params-title">⚡ 暴露参数配置</div>
+                    <div class="exposed-params-sub">配置后，C端用户执行此工作流时需填写这些参数</div>
+                    <button class="preview-icon-btn" type="button" onclick="closeExposedParamsPanel()" title="关闭"><i data-lucide="x" class="w-4 h-4"></i></button>
+                </div>
+                <div id="exposedParamsList" class="exposed-params-list"></div>
+                <div class="exposed-params-actions">
+                    <button class="exposed-add-btn" onclick="addExposedParam()">+ 添加参数</button>
+                    <button class="exposed-save-btn" onclick="flushExposedParamsForm(); closeExposedParamsPanel();">完成</button>
                 </div>
             </div>
         </div>

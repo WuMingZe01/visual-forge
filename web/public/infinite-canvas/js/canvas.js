@@ -60,6 +60,22 @@ window.addEventListener('message', event => {
             canvas.title = wf.name || 'Imported Workflow';
             canvas.nodes = nodes;
             canvas.connections = connections;
+            // Restore exposed params if present
+            if (wf.exposed_mapping && typeof wf.exposed_mapping === 'object') {
+                exposedParams = {};
+                for (const [varName, def] of Object.entries(wf.exposed_mapping)) {
+                    if (def && def.node_id) {
+                        exposedParams[varName] = {
+                            node_id: idMap[def.node_id] || def.node_id,
+                            path: def.path || [],
+                            type: def.type || 'text',
+                            label: def.label || '',
+                            required: !!def.required,
+                        };
+                    }
+                }
+                console.log('[Canvas] Restored exposed params:', Object.keys(exposedParams).length);
+            }
             setCanvasMode(true);
             render();
             setStatus('✅ 已加载: ' + (wf.name || ''));
@@ -254,6 +270,8 @@ let outputCompareDrag = false;
 let outputPreviewZoom = 1;
 let outputPreviewPan = {x: 0, y: 0};
 let outputPreviewPanDrag = null;
+// ── 暴露参数（exposed_mapping）──
+let exposedParams = {};
 let currentOutputCompareUrl = '';
 let currentOutputMeta = null;
 let currentOutputLightboxOutId = '';
@@ -10486,14 +10504,187 @@ window.onload = async () => {
     try { window.parent.postMessage({type:'canvas-ready'}, '*'); } catch(e){}
 };
 
+// ── 暴露参数面板 ──
+function resolveNodeFields(node) {
+    // Return [{ key, label, type, path }] for fields that can be exposed on a node
+    const fields = [];
+    if (node.type === 'prompt') {
+        fields.push({ key: 'text', label: '提示词内容', type: 'text', path: ['text'] });
+    } else if (node.type === 'image') {
+        fields.push({ key: 'url', label: '图片URL', type: 'image', path: ['url'] });
+        fields.push({ key: 'name', label: '图片名称', type: 'text', path: ['name'] });
+    } else if (node.type === 'generator' || node.type === 'msgen') {
+        fields.push({ key: 'model', label: '模型', type: 'select', path: ['model'] });
+        fields.push({ key: 'resolution', label: '分辨率', type: 'select', path: ['resolution'] });
+    }
+    return fields;
+}
+
+function openExposedParamsPanel() {
+    const modal = document.getElementById('exposedParamsModal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    renderExposedParamsList();
+}
+
+function closeExposedParamsPanel() {
+    const modal = document.getElementById('exposedParamsModal');
+    if (modal) modal.style.display = 'none';
+}
+
+function buildNodeOptionsHtml() {
+    // Build <option> list from current canvas nodes
+    return nodes.map(n => {
+        const typeLabel = { prompt: '提示词', image: '图片', generator: 'API生成', msgen: 'MS生成', llm: 'LLM', comfy: 'ComfyUI', rh: 'RH', video: '视频', loop: '循环', output: '输出' }[n.type] || n.type;
+        const label = `${n.id.substring(0, 8)}… (${typeLabel})${n.text ? ': ' + n.text.substring(0, 30) : ''}`;
+        return `<option value="${escapeAttr(n.id)}">${escapeHtml(label)}</option>`;
+    }).join('');
+}
+
+function buildNodeFieldsHtml(nodeId) {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return '';
+    const fields = resolveNodeFields(node);
+    return fields.map(f => `<option value="${escapeAttr(f.key)}" data-path="${escapeAttr(JSON.stringify(f.path))}" data-type="${escapeAttr(f.type)}">${escapeHtml(f.label)} (${f.type})</option>`).join('');
+}
+
+function renderExposedParamsList() {
+    const list = document.getElementById('exposedParamsList');
+    const nodeOptions = buildNodeOptionsHtml();
+    if (!list) return;
+
+    let html = '';
+    const entries = Object.entries(exposedParams);
+    entries.forEach(([varName, def], idx) => {
+        const fieldOptions = def.node_id ? buildNodeFieldsHtml(def.node_id) : '';
+        html += `
+        <div class="exposed-param-row" data-var="${escapeAttr(varName)}">
+            <div class="exposed-param-fields">
+                <label class="exposed-field">
+                    <span class="exposed-field-label">变量名</span>
+                    <input type="text" class="exposed-input exposed-var-name" value="${escapeAttr(varName)}" placeholder="如 user_prompt" style="width:120px">
+                </label>
+                <label class="exposed-field">
+                    <span class="exposed-field-label">中文标签</span>
+                    <input type="text" class="exposed-input exposed-label" value="${escapeAttr(def.label || '')}" placeholder="如 用户提示词" style="width:120px">
+                </label>
+                <label class="exposed-field">
+                    <span class="exposed-field-label">类型</span>
+                    <select class="exposed-select exposed-type">
+                        <option value="text" ${def.type === 'text' ? 'selected' : ''}>文本</option>
+                        <option value="image" ${def.type === 'image' ? 'selected' : ''}>图片</option>
+                        <option value="select" ${def.type === 'select' ? 'selected' : ''}>下拉</option>
+                    </select>
+                </label>
+                <label class="exposed-field">
+                    <span class="exposed-field-label">目标节点</span>
+                    <select class="exposed-select exposed-node-id" onchange="onExposedNodeChange(this)" style="min-width:140px">
+                        <option value="">-- 选择节点 --</option>
+                        ${nodeOptions.replace(new RegExp('value="' + escapeAttr(def.node_id || '') + '"'), 'value="' + escapeAttr(def.node_id || '') + '" selected')}
+                    </select>
+                </label>
+                <label class="exposed-field">
+                    <span class="exposed-field-label">目标字段</span>
+                    <select class="exposed-select exposed-field-key" data-path-val="${escapeAttr(JSON.stringify(def.path || []))}">
+                        ${fieldOptions ? fieldOptions.replace(new RegExp('value="' + escapeAttr(def.path ? def.path[def.path.length-1] || '' : '') + '"'), 'value="' + escapeAttr(def.path ? def.path[def.path.length-1] || '' : '') + '" selected') : '<option value="">-- 先选节点 --</option>'}
+                    </select>
+                </label>
+                <label class="exposed-field exposed-required-label">
+                    <input type="checkbox" class="exposed-checkbox exposed-required" ${def.required ? 'checked' : ''}>
+                    <span class="exposed-field-label">必填</span>
+                </label>
+                <button class="exposed-remove-btn" onclick="removeExposedParam('${escapeAttr(varName)}')" title="移除">✕</button>
+            </div>
+        </div>`;
+    });
+
+    if (entries.length === 0) {
+        html = '<div class="exposed-empty">还没有暴露参数，点击下方按钮添加</div>';
+    }
+
+    list.innerHTML = html;
+}
+
+function onExposedNodeChange(selectEl) {
+    // When node changes, rebuild field options for that row
+    const row = selectEl.closest('.exposed-param-row');
+    const fieldSelect = row.querySelector('.exposed-field-key');
+    const nodeId = selectEl.value;
+    if (nodeId) {
+        fieldSelect.innerHTML = buildNodeFieldsHtml(nodeId);
+    } else {
+        fieldSelect.innerHTML = '<option value="">-- 先选节点 --</option>';
+    }
+}
+
+function addExposedParam() {
+    const varName = 'param_' + Date.now();
+    const nodeId = nodes.length > 0 ? nodes[0].id : '';
+    const node = nodes.find(n => n.id === nodeId);
+    const fields = node ? resolveNodeFields(node) : [];
+    const firstField = fields.length > 0 ? fields[0] : null;
+    exposedParams[varName] = {
+        node_id: nodeId,
+        path: firstField ? firstField.path : [],
+        type: firstField ? firstField.type : 'text',
+        label: '',
+        required: false,
+    };
+    renderExposedParamsList();
+}
+
+function removeExposedParam(varName) {
+    delete exposedParams[varName];
+    renderExposedParamsList();
+}
+
+function flushExposedParamsForm() {
+    // Rebuild exposedParams from the DOM form
+    const rows = document.querySelectorAll('#exposedParamsList .exposed-param-row');
+    const newParams = {};
+    rows.forEach(row => {
+        const varNameInput = row.querySelector('.exposed-var-name');
+        const labelInput = row.querySelector('.exposed-label');
+        const typeSelect = row.querySelector('.exposed-type');
+        const nodeIdSelect = row.querySelector('.exposed-node-id');
+        const fieldKeySelect = row.querySelector('.exposed-field-key');
+        const requiredCheck = row.querySelector('.exposed-required');
+
+        let varName = (varNameInput?.value || '').trim();
+        if (!varName) return;
+
+        let path = [];
+        try { path = JSON.parse(fieldKeySelect?.dataset?.pathVal || fieldKeySelect?.getAttribute('data-path-val') || '[]'); } catch(e) {}
+        // Use selected field key as path
+        const fieldKey = fieldKeySelect?.value;
+        if (fieldKey) path = [fieldKey];
+
+        const node = nodes.find(n => n.id === (nodeIdSelect?.value || ''));
+        const nodeFields = node ? resolveNodeFields(node) : [];
+        const fieldDef = nodeFields.find(f => f.key === fieldKey);
+
+        newParams[varName] = {
+            node_id: nodeIdSelect?.value || '',
+            path: path,
+            type: typeSelect?.value || fieldDef?.type || 'text',
+            label: labelInput?.value || '',
+            required: requiredCheck?.checked || false,
+        };
+    });
+    exposedParams = newParams;
+}
+
 // ── 流水线模板保存 ──
 async function saveAsPipelineTemplate(){
     if(!canvas || !nodes.length){ alert('请先添加节点'); return; }
+    // Flush form data into exposedParams before saving
+    flushExposedParamsForm();
     try {
         const payload = {
             name: canvas.title || '未命名流水线',
             nodes: serializableCanvasNodes(),
             connections: connections,
+            exposed_mapping: Object.keys(exposedParams).length > 0 ? exposedParams : undefined,
         };
         // Notify parent VF window via postMessage (iframe bridge)
         try {
@@ -10507,7 +10698,11 @@ async function saveAsPipelineTemplate(){
         });
         const data = await res.json();
         if(data.ok){
-            alert('✅ 流水线模板已保存: ' + data.name + '\n启用阶段: ' + (data.enabled_stages||[]).join(' → '));
+            const fieldCount = Object.keys(exposedParams).length;
+            const msg = fieldCount > 0
+                ? '✅ 流水线模板已保存: ' + data.name + '\n暴露参数: ' + fieldCount + ' 个\n启用阶段: ' + (data.enabled_stages||[]).join(' → ')
+                : '✅ 流水线模板已保存: ' + data.name + '\n启用阶段: ' + (data.enabled_stages||[]).join(' → ');
+            alert(msg);
         } else {
             alert('保存失败: ' + JSON.stringify(data));
         }
