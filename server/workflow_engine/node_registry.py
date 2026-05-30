@@ -72,20 +72,36 @@ PROVIDER_MAP = {
 }
 
 
+# Model fallback chain: try these models in order until one succeeds
+MODEL_FALLBACK_CHAIN = ["gpt-image-2-vip", "gpt-image-2", "gpt-image-1-mini", "gpt-image-2-all"]
+
+
+async def _try_generate(provider, prompt, ref_image_url, ratio, resolution, model_id, **kwargs) -> ProviderResult:
+    """Try generating with a specific provider+model. Returns result (may be failed)."""
+    from .providers.base import ProviderResult as PR
+    try:
+        return await provider.generate(
+            prompt=prompt, ref_image_url=ref_image_url,
+            ratio=ratio, resolution=resolution,
+            model_id=model_id, **kwargs,
+        )
+    except Exception as e:
+        return PR(success=False, error=str(e)[:200])
+
+
 async def execute_generator_node(node: dict, ctx: PipelineContext) -> NodeOutput:
     """
     Execute a generator-type node (generator / msgen).
 
-    This is the CORE DAG execution logic:
-      1. Traverse upstream connections to gather prompt text and reference images
-      2. Use node.apiProvider to select the correct provider (yunwu / grsai)
-      3. Extract generation params (ratio, resolution) from node properties
-      4. Call Provider.generate() and return the result
+    DAG execution with fallback:
+      1. Extract prompt + ref_image from upstream connections
+      2. Try primary provider (from node.apiProvider, default GrsAI)
+      3. On failure, try fallback models and provider
+      4. Return first successful result or the last error
     """
     from .providers import get_provider
 
-    provider_name = node.get("apiProvider", "auto")
-    provider = get_provider(provider_name)
+    logger = __import__('logging').getLogger(__name__)
 
     # ── Step 1: Extract inputs from upstream DAG connections ──
     prompt = ""
@@ -109,38 +125,53 @@ async def execute_generator_node(node: dict, ctx: PipelineContext) -> NodeOutput
     # ── Step 2: Extract generation params from node properties ──
     ratio = node.get("ratio", "square")
     resolution = node.get("resolution", "2k")
-    model_id = node.get("model", "") or node.get("modelId", "")
+    node_model = node.get("model", "") or node.get("modelId", "")
     width = node.get("width")
     height = node.get("height")
 
-    # ── Step 3: Call the Provider with extracted params ──
-    logger = __import__('logging').getLogger(__name__)
-    logger.info(
-        f"[DAG] Executing {node['type']} node '{node['id']}': "
-        f"provider={provider_name}, prompt_len={len(prompt)}, "
-        f"ref_image={'yes' if ref_image else 'no'}, ratio={ratio}, resolution={resolution}"
-    )
+    primary_provider = node.get("apiProvider", "auto")
 
-    result = await provider.generate(
-        prompt=prompt,
-        ref_image_url=ref_image,
-        ratio=ratio,
-        resolution=resolution,
-        model_id=model_id if model_id else None,
-        width=width if width else None,
-        height=height if height else None,
-    )
+    # ── Step 3: Try providers with fallback ──
+    # Build a list of (provider_name, model_id) pairs to try in order
+    attempts = []
+    if node_model:
+        # User specified a model → try it with its preferred provider first
+        attempts.append((primary_provider, node_model))
+    # Then try the fallback chain
+    for m in MODEL_FALLBACK_CHAIN:
+        if m == node_model:
+            continue  # already tried
+        # Determine provider for this model (match frontend logic)
+        if m.startswith("nano-banana") or m == "gpt-image-2-vip" or m == "gpt-image-2":
+            attempts.append(("grsai", m))
+        else:
+            attempts.append(("yunwu", m))
 
-    logger.info(
-        f"[DAG] Node '{node['id']}' result: success={result.success}, "
-        f"urls={len(result.urls)}, error={result.error[:80] if result.error else ''}"
-    )
+    last_error = ""
+    for i, (prov_name, model_id) in enumerate(attempts):
+        provider = get_provider(prov_name)
+        logger.info(
+            f"[DAG] Node '{node['id']}' attempt {i+1}/{len(attempts)}: "
+            f"provider={prov_name}, model={model_id}, prompt_len={len(prompt)}"
+        )
+        result = await _try_generate(
+            provider, prompt, ref_image, ratio, resolution, model_id,
+            width=width if width else None, height=height if height else None,
+        )
+        if result.success:
+            logger.info(f"[DAG] Node '{node['id']}' SUCCESS: {len(result.urls)} urls")
+            return NodeOutput(
+                node_id=node["id"], node_type=node.get("type", "generator"),
+                result=result.urls, error="",
+            )
+        last_error = result.error or "unknown"
+        logger.warning(f"[DAG] Node '{node['id']}' attempt {i+1} failed: {last_error[:100]}")
 
+    # All attempts failed
+    logger.error(f"[DAG] Node '{node['id']}' ALL {len(attempts)} ATTEMPTS FAILED. Last error: {last_error[:200]}")
     return NodeOutput(
-        node_id=node["id"],
-        node_type=node.get("type", "generator"),
-        result=result.urls if result.success else None,
-        error=result.error if not result.success else None,
+        node_id=node["id"], node_type=node.get("type", "generator"),
+        result=None, error=last_error[:300],
     )
 
 

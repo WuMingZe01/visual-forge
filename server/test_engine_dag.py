@@ -22,30 +22,32 @@ from workflow_engine.node_registry import get_node_handler, NODE_TYPE_MAP
 
 class MockCaptureProvider:
     """Captures the params passed to generate() for assertions."""
-    def __init__(self):
+    def __init__(self, name="mock"):
+        self.name = name
         self.calls = []
 
-    async def generate(self, prompt="", ref_image_url=None, ratio="square", resolution="2k", **kwargs):
+    async def generate(self, prompt="", ref_image_url=None, ratio="square", resolution="2k", model_id=None, **kwargs):
         self.calls.append({
             "prompt": prompt,
             "ref_image_url": ref_image_url,
             "ratio": ratio,
             "resolution": resolution,
+            "model_id": model_id,
             "kwargs": kwargs,
         })
         from workflow_engine.providers.base import ProviderResult
-        return ProviderResult(success=True, urls=["https://mock.cdn/test_output.jpg"])
+        return ProviderResult(success=True, urls=[f"https://mock.cdn/{self.name}_output.jpg"])
 
 
 # ── Test 1: DAG with 2 nodes (prompt → generator) ──
 
 def test_dag_prompt_to_generator():
     """DAG: prompt node → generator node. Verify prompt text reaches Provider."""
-    mock = MockCaptureProvider()
+    mock = MockCaptureProvider("dag_test")
 
     # Patch get_provider to return our mock
     import workflow_engine.providers as prov
-    prov._yunwu = mock
+    prov._yunwu = mock; prov._grsai = mock
     prov._grsai = mock
 
     ctx = PipelineContext(
@@ -78,9 +80,9 @@ def test_dag_prompt_to_generator():
 
 def test_dag_image_to_generator():
     """DAG: image node → generator node. Verify image URL reaches Provider."""
-    mock = MockCaptureProvider()
+    mock = MockCaptureProvider("dag")
     import workflow_engine.providers as prov
-    prov._yunwu = mock
+    prov._yunwu = mock; prov._grsai = mock
 
     ctx = PipelineContext(
         runtime_template={
@@ -111,9 +113,9 @@ def test_dag_image_to_generator():
 
 def test_dag_full_topology():
     """Full DAG: prompt + image → generator. Both should reach Provider."""
-    mock = MockCaptureProvider()
+    mock = MockCaptureProvider("dag")
     import workflow_engine.providers as prov
-    prov._yunwu = mock
+    prov._yunwu = mock; prov._grsai = mock
 
     ctx = PipelineContext(
         runtime_template={
@@ -145,9 +147,9 @@ def test_dag_full_topology():
 
 def test_dag_msgen_node():
     """msgen type nodes should use the same execute_generator_node handler."""
-    mock = MockCaptureProvider()
+    mock = MockCaptureProvider("dag")
     import workflow_engine.providers as prov
-    prov._yunwu = mock
+    prov._yunwu = mock; prov._grsai = mock
 
     ctx = PipelineContext(
         runtime_template={
@@ -189,9 +191,9 @@ def test_node_registry_coverage():
 
 def test_dag_no_upstream_uses_default():
     """Generator with no upstream prompt → use DEFAULT_PROMPT."""
-    mock = MockCaptureProvider()
+    mock = MockCaptureProvider("dag")
     import workflow_engine.providers as prov
-    prov._yunwu = mock
+    prov._yunwu = mock; prov._grsai = mock
 
     ctx = PipelineContext(
         runtime_template={
@@ -214,9 +216,9 @@ def test_dag_no_upstream_uses_default():
 
 def test_dag_node_level_prompt():
     """If node has prompt/text field but no upstream prompt, use node's value."""
-    mock = MockCaptureProvider()
+    mock = MockCaptureProvider("dag")
     import workflow_engine.providers as prov
-    prov._yunwu = mock
+    prov._yunwu = mock; prov._grsai = mock
     prov._grsai = mock  # node uses grsai provider
 
     ctx = PipelineContext(
