@@ -73,7 +73,8 @@ PROVIDER_MAP = {
 
 
 # Model fallback chain: try these models in order until one succeeds
-MODEL_FALLBACK_CHAIN = ["gpt-image-2-vip", "gpt-image-2", "gpt-image-1-mini", "gpt-image-2-all"]
+# gpt-image-2 first (most reliable), then VIP, then Yunwu models
+MODEL_FALLBACK_CHAIN = ["gpt-image-2", "gpt-image-2-vip", "gpt-image-1-mini", "gpt-image-2-all"]
 
 
 async def _try_generate(provider, prompt, ref_image_url, ratio, resolution, model_id, **kwargs) -> ProviderResult:

@@ -153,6 +153,22 @@ def get_pool_capacity(provider: str, yunwu_max_concurrent: int = 3, grsai_max_co
     return len(available) * max_per_key
 
 
+# Transient error patterns — these do NOT count as key failures (matches frontend logic)
+TRANSIENT_ERROR_PATTERNS = [
+    "excessive system load", "excessive", "high load", "负载已饱和",
+    "负载过高", "rate limit", "too many requests", "429", "503",
+    "上游负载", "无可用的 distributor", "timeout", "timed out",
+]
+
+
+def is_transient_error(error_msg: str) -> bool:
+    """Check if an error is transient (load-based, rate-limit) — should not penalize the key."""
+    if not error_msg:
+        return False
+    msg_lower = error_msg.lower()
+    return any(pattern.lower() in msg_lower for pattern in TRANSIENT_ERROR_PATTERNS)
+
+
 def get_total_capacity(yunwu_max_concurrent: int = 3, grsai_max_concurrent: int = 1) -> int:
     """Get total capacity across Yunwu + Grsai."""
     return (
@@ -194,8 +210,16 @@ def acquire_key(pool: KeyPool) -> str:
     return chosen.key
 
 
-def release_key(pool: KeyPool, key: str, success: bool) -> None:
-    """Release a key after use. Update circuit breaker state on failure."""
+def release_key(pool: KeyPool, key: str, success: bool, transient: bool = False) -> None:
+    """Release a key after use. Update circuit breaker state on failure.
+
+    Args:
+        pool: KeyPool to release the key to
+        key: The API key string
+        success: Whether the operation succeeded
+        transient: If True, failure is considered transient (e.g. load-based)
+                   and does NOT count toward circuit breaker threshold.
+    """
     for ks in pool.keys:
         if ks.key == key:
             ks.in_use = max(0, ks.in_use - 1)
@@ -204,7 +228,7 @@ def release_key(pool: KeyPool, key: str, success: bool) -> None:
                 ks.stats.consecutive_fails = 0
                 if ks.circuit_state == "half-open":
                     ks.circuit_state = "closed"
-            else:
+            elif not transient:
                 ks.stats.fail_count += 1
                 ks.stats.consecutive_fails += 1
                 ks.stats.last_fail_time = time.time()

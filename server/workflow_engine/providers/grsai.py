@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from .base import BaseProvider, ProviderResult
-from .key_pool import KeyPool, merge_pool, acquire_key, release_key, _pool_for, _grsai_pool
+from .key_pool import KeyPool, merge_pool, acquire_key, release_key, _pool_for, _grsai_pool, is_transient_error
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +277,7 @@ class GrsAIProvider(BaseProvider):
             release_key(pool, key, success=True)
             return ProviderResult(success=True, urls=[url])
         except Exception as e:
-            release_key(pool, key, success=False)
+            release_key(pool, key, success=False, transient=is_transient_error(str(e)))
             return ProviderResult(success=False, error=str(e))
 
     async def health_check(self) -> bool:
