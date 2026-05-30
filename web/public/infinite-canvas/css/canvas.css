@@ -529,6 +529,10 @@ body.theme-dark .minimap-viewport { border-color:#f8fafc; background:rgba(248,25
 .preview-text-btn.secondary { background:#f8fafc; color:#111827; border:1px solid #e2e8f0; }
 .preview-text-btn.copied { background:#10b981; color:#fff; border-color:#10b981; }
 
+/* ── 节点暴露变量徽章 ── */
+.exposed-node-badge { display:inline-flex; align-items:center; gap:2px; padding:1px 5px; border-radius:999px; background:linear-gradient(135deg,#f59e0b,#ef4444); color:#fff; font-size:9px; font-weight:900; vertical-align:middle; margin-left:4px; cursor:pointer; }
+.exposed-node-badge:hover { opacity:.85; transform:scale(1.05); }
+
 /* ── 暴露参数面板 ── */
 .exposed-params-modal { position:absolute; inset:0; z-index:85; display:none; align-items:center; justify-content:center; padding:28px; background:rgba(248,250,252,.42); backdrop-filter:blur(18px); }
 .exposed-params-modal.open { display:flex; }

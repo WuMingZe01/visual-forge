@@ -91,18 +91,22 @@ export function InfiniteCanvas() {
           // Send pending workflow if one is waiting
           if (pendingWorkflow && !pendingSentRef.current) {
             pendingSentRef.current = true;
-            const hasCanvasNodes = pendingWorkflow.canvas_nodes && pendingWorkflow.canvas_nodes.length > 0;
-            if (hasCanvasNodes) {
+            const canvasNodes = pendingWorkflow.canvas_nodes || pendingWorkflow.nodes || [];
+            const canvasConns = pendingWorkflow.canvas_connections || pendingWorkflow.connections || [];
+            const hasNodes = canvasNodes.length > 0;
+            if (hasNodes) {
               sendToCanvas({
                 type: 'vf-load-workflow',
                 data: {
                   name: pendingWorkflow.name,
-                  nodes: pendingWorkflow.canvas_nodes || pendingWorkflow.nodes || [],
-                  connections: pendingWorkflow.canvas_connections || pendingWorkflow.connections || [],
+                  nodes: canvasNodes,
+                  connections: canvasConns,
                   exposed_mapping: pendingWorkflow.exposed_mapping || {},
                 }
               });
               setStatusText('已加载工作流: ' + pendingWorkflow.name);
+            } else {
+              setStatusText('画布就绪（空模板）');
             }
             clearPendingWorkflow();
           }

@@ -4419,12 +4419,19 @@ function renderNode(node){
         refreshSelectionVisuals();
     };
     el.oncontextmenu = e => {
-    if(!CANVAS_GENERATOR_TYPES.includes(node.type) && node.type !== 'output') return;
+        const canExpose = node.type === 'prompt' || node.type === 'image';
+        if(!CANVAS_GENERATOR_TYPES.includes(node.type) && node.type !== 'output' && !canExpose) return;
         e.preventDefault();
         e.stopPropagation();
         if(node.type === 'output') openOutputNodeMenu(node.id, e.clientX, e.clientY);
+        else if(canExpose) openNodeExposeMenu(node, e.clientX, e.clientY);
         else openGeneratorNodeMenu(node.id, e.clientX, e.clientY);
     };
+    // ── Exposed fields badge ──
+    const exposedVars = Object.entries(exposedParams).filter(([_, d]) => d.node_id === node.id);
+    const exposedBadge = exposedVars.length > 0
+        ? `<span class="exposed-node-badge" title="暴露变量: ${exposedVars.map(([n]) => n).join(', ')}">⚡${exposedVars.length}</span>`
+        : '';
     const title = node.type === 'image' ? 'Image' : node.type === 'prompt' ? 'Prompt' : node.type === 'loop' ? tr('canvas.loopNode') : node.type === 'promptGroup' ? 'Prompts' : node.type === 'group' ? 'Group' : node.type === 'output' ? 'Output' : node.type === 'llm' ? 'LLM' : node.type === 'comfy' ? 'ComfyUI' : node.type === 'ltxDirector' ? tr('canvas.ltxDirector') : node.type === 'rh' ? 'RunningHub' : node.type === 'msgen' ? tr('canvas.modelscopeGenerate') : node.type === 'video' ? tr('canvas.videoGenerateNode') : tr('canvas.apiGenerate');
     const displayTitle = node.type === 'image' && node.url ? nodeTitleForMedia(node) : title;
     // 失败徽章只在一键运行模式中显示，单节点失败已通过 alert 提示
@@ -4434,7 +4441,7 @@ function renderNode(node){
         const label = { queued:'排队中', running:'运行中', done:'完成', failed:'失败' }[node.runStatus] || '';
         return `<span class="node-run-status ${node.runStatus}"><span class="dot"></span>${escapeHtml(label)}${node._cascadeIdx?' '+node._cascadeIdx:''}</span>`;
     })() : '';
-    el.innerHTML = `<div class="node-head"><span class="node-title">${displayTitle}</span><div style="display:flex;align-items:center;gap:8px">${statusHtml}<button onclick="deleteNodeFromButton('${node.id}', event)" class="text-gray-300 hover:text-red-500"><i data-lucide="x" class="w-4 h-4"></i></button></div></div>`;
+    el.innerHTML = `<div class="node-head"><span class="node-title">${displayTitle}${exposedBadge}</span><div style="display:flex;align-items:center;gap:8px">${statusHtml}<button onclick="deleteNodeFromButton('${node.id}', event)" class="text-gray-300 hover:text-red-500"><i data-lucide="x" class="w-4 h-4"></i></button></div></div>`;
     const body = document.createElement('div');
     body.className = 'node-body';
     if(node.type === 'image') {
@@ -10518,6 +10525,74 @@ function resolveNodeFields(node) {
         fields.push({ key: 'resolution', label: '分辨率', type: 'select', path: ['resolution'] });
     }
     return fields;
+}
+
+function openNodeExposeMenu(node, x, y) {
+    // Remove any existing expose menu
+    const existing = document.getElementById('nodeExposeMenu');
+    if (existing) { existing.remove(); return; }
+
+    const fields = resolveNodeFields(node);
+    if (!fields.length) return;
+
+    const menu = document.createElement('div');
+    menu.id = 'nodeExposeMenu';
+    menu.className = 'create-menu';
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+    menu.style.display = 'block';
+    menu.style.zIndex = '100';
+
+    const header = document.createElement('div');
+    header.className = 'text-[10px] font-bold text-forge-text2 px-3 py-1.5 border-b border-forge-border/30';
+    header.textContent = `⚡ 暴露变量 — ${node.id.substring(0, 8)}…`;
+    menu.appendChild(header);
+
+    fields.forEach(f => {
+        const btn = document.createElement('button');
+        btn.className = 'menu-btn';
+        const varName = f.path.join('_');
+        const alreadyExposed = Object.entries(exposedParams).find(([_, d]) => d.node_id === node.id && d.path.join('_') === varName);
+        btn.innerHTML = `${alreadyExposed ? '🟡' : '⚡'} <span>${f.label} → ${f.key}</span>`;
+        btn.onclick = () => {
+            if (alreadyExposed) {
+                // Remove existing entry
+                const key = Object.keys(exposedParams).find(k => exposedParams[k].node_id === node.id && exposedParams[k].path.join('_') === varName);
+                if (key) delete exposedParams[key];
+            } else {
+                const autoName = `${node.type}_${f.key}_${node.id.substring(0, 6)}`;
+                exposedParams[autoName] = {
+                    node_id: node.id,
+                    path: f.path,
+                    type: f.type,
+                    label: f.label,
+                    required: false,
+                };
+            }
+            menu.remove();
+            render(); // Re-render to update badges
+        };
+        menu.appendChild(btn);
+    });
+
+    const divider = document.createElement('div');
+    divider.className = 'border-t border-forge-border/30 my-1';
+    menu.appendChild(divider);
+
+    const manageBtn = document.createElement('button');
+    manageBtn.className = 'menu-btn';
+    manageBtn.innerHTML = '📋 <span>管理所有变量…</span>';
+    manageBtn.onclick = () => { menu.remove(); openExposedParamsPanel(); };
+    menu.appendChild(manageBtn);
+
+    document.body.appendChild(menu);
+    // Close on outside click
+    setTimeout(() => {
+        const closeHandler = (ev) => {
+            if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', closeHandler); }
+        };
+        document.addEventListener('click', closeHandler);
+    }, 50);
 }
 
 function openExposedParamsPanel() {

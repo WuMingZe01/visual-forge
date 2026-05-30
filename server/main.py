@@ -5873,29 +5873,35 @@ def generate(req: GenerateRequest):
 
         seed = random.randint(1, 10**15)
 
-        if "23" in workflow and req.prompt:
-            workflow["23"]["inputs"]["text"] = req.prompt
-        if "144" in workflow:
-            workflow["144"]["inputs"]["width"] = req.width
-            workflow["144"]["inputs"]["height"] = req.height
-        if "22" in workflow:
-            workflow["22"]["inputs"]["seed"] = seed
-        if "158" in workflow:
-            workflow["158"]["inputs"]["noise_seed"] = seed
-        for node_id in ["146", "181"]:
-            if node_id in workflow and "inputs" in workflow[node_id] and "seed" in workflow[node_id]["inputs"]:
-                workflow[node_id]["inputs"]["seed"] = seed
-        if "184" in workflow and "inputs" in workflow["184"] and "seed" in workflow["184"]["inputs"]:
-            workflow["184"]["inputs"]["seed"] = seed
-        if "172" in workflow and "inputs" in workflow["172"] and "seed" in workflow["172"]["inputs"]:
-            workflow["172"]["inputs"]["seed"] = seed % 4294967295
-        if "14" in workflow and "inputs" in workflow["14"] and "seed" in workflow["14"]["inputs"]:
-            workflow["14"]["inputs"]["seed"] = seed
+        # ── 通用 ComfyUI 注入：按 class_type / input 名称扫描，不依赖节点 ID ──
+        for node_id, node_data in workflow.items():
+            if not isinstance(node_data, dict):
+                continue
+            inputs = node_data.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+            class_type = node_data.get("class_type", "")
 
+            # 种子注入：仅对 KSampler / 包含 seed/noise_seed 的非 conditioning 节点
+            for seed_key in ("seed", "noise_seed"):
+                if seed_key in inputs:
+                    inputs[seed_key] = seed
+
+            # 提示词注入：CLIPTextEncode 节点
+            if req.prompt and "text" in inputs and class_type == "CLIPTextEncode":
+                inputs["text"] = req.prompt
+
+            # 尺寸注入：仅当调用方显式传入了非默认宽高
+            if req.width != 1024 or req.height != 1024:
+                if "width" in inputs:
+                    inputs["width"] = req.width
+                if "height" in inputs:
+                    inputs["height"] = req.height
+
+        # 显式 params 覆盖（优先级最高，始终生效）
         for node_id, node_inputs in req.params.items():
             if node_id in workflow:
-                if "inputs" not in workflow[node_id]:
-                    workflow[node_id]["inputs"] = {}
+                workflow[node_id].setdefault("inputs", {})
                 for input_name, value in node_inputs.items():
                     workflow[node_id]["inputs"][input_name] = value
 
@@ -6814,8 +6820,8 @@ def get_workflow_detail(name: str):
             "description": data.get("description", ""),
             "stages": data.get("stages", []),
             "options": data.get("options", {}),
-            "nodes": data.get("source_canvas_nodes", []),
-            "connections": data.get("source_canvas_connections", []),
+            "nodes": data.get("canvas_nodes", []),
+            "connections": data.get("canvas_connections", []),
             "exposed_mapping": data.get("exposed_mapping", {}),
             "exposed_fields": get_exposed_fields(data),
         }
