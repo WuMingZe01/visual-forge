@@ -10714,6 +10714,12 @@ function removeExposedParam(varName) {
 }
 
 function flushExposedParamsForm() {
+    // Only flush from DOM if the modal is currently open.
+    // When the modal is closed, keep the in-memory exposedParams (set via right-click or previous modal edits).
+    const modal = document.getElementById('exposedParamsModal');
+    if (!modal || !modal.style.display || modal.style.display === 'none') {
+        return; // Keep in-memory exposedParams unchanged
+    }
     // Rebuild exposedParams from the DOM form
     const rows = document.querySelectorAll('#exposedParamsList .exposed-param-row');
     const newParams = {};
