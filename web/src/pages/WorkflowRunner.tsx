@@ -1,23 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Play, ChevronRight, Upload, X, Image as ImageIcon,
+  Play, ChevronRight, X, Image as ImageIcon,
   Loader2, CheckCircle2, AlertCircle, RefreshCw, Zap,
   Settings, Edit3, Workflow
 } from 'lucide-react';
 import { useWorkflowStore } from '@/store/useWorkflowStore';
-
-/* ── Backend types ─────────────────────────────────────────── */
-
-interface ExposedField {
-  name: string;
-  label: string;
-  type: 'image' | 'text' | 'select';
-  required: boolean;
-  default: string | null;
-  options: string[];
-  placeholder: string;
-}
+import { DynamicTemplateForm, type ExposedField } from '@/components/DynamicTemplateForm';
 
 interface WorkflowTemplate {
   name: string;
@@ -158,15 +147,6 @@ export function WorkflowRunner() {
     }, 2000);
   }, [refreshTasks]);
 
-  // ── Image upload handler (converts file to data URL) ──
-  const handleImageUpload = useCallback((fieldName: string) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setFormData(prev => ({ ...prev, [fieldName]: reader.result as string }));
-    reader.readAsDataURL(file);
-  }, []);
-
   // ── Run workflow via new execute endpoint ──
   const handleRun = useCallback(async () => {
     if (!selected) return;
@@ -243,91 +223,6 @@ export function WorkflowRunner() {
 
   // ── Exposed fields from selected workflow detail ──
   const exposedFields: ExposedField[] = selectedDetail?.exposed_fields || [];
-
-  // ── Render a single dynamic field ──
-  const renderField = (field: ExposedField) => {
-    const value = formData[field.name] ?? '';
-
-    if (field.type === 'image') {
-      return (
-        <div key={field.name}>
-          <label className="text-xs text-forge-text2 mb-1 block">
-            {field.label} {field.required && <span className="text-red-400">*</span>}
-          </label>
-          {value && value.startsWith('data:') ? (
-            <div className="relative group">
-              <img src={value} className="w-full h-24 object-contain rounded-lg bg-forge-surface2" alt="" />
-              <button
-                onClick={() => setFormData(prev => ({ ...prev, [field.name]: '' }))}
-                className="absolute top-1 right-1 bg-black/60 rounded p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-              >
-                <X size={12} />
-              </button>
-            </div>
-          ) : value && (value.startsWith('http://') || value.startsWith('https://')) ? (
-            <div className="relative group">
-              <img src={value} className="w-full h-24 object-contain rounded-lg bg-forge-surface2" alt="" />
-              <button
-                onClick={() => setFormData(prev => ({ ...prev, [field.name]: '' }))}
-                className="absolute top-1 right-1 bg-black/60 rounded p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-              >
-                <X size={12} />
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              <label className="flex items-center justify-center gap-2 h-20 border-2 border-dashed border-forge-border rounded-lg cursor-pointer hover:border-forge-cyan/40 text-forge-text2 text-xs transition-colors">
-                <Upload size={14} /> 上传图片
-                <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload(field.name)} />
-              </label>
-              <input
-                type="text"
-                value={value}
-                onChange={e => setFormData(prev => ({ ...prev, [field.name]: e.target.value }))}
-                placeholder={field.placeholder || '或输入图片 URL'}
-                className="w-full bg-forge-surface2 border border-forge-border rounded-lg px-3 py-1.5 text-sm text-forge-text focus:border-forge-cyan/40 outline-none"
-              />
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    if (field.type === 'select') {
-      return (
-        <div key={field.name}>
-          <label className="text-xs text-forge-text2 mb-1 block">
-            {field.label} {field.required && <span className="text-red-400">*</span>}
-          </label>
-          <select
-            value={value}
-            onChange={e => setFormData(prev => ({ ...prev, [field.name]: e.target.value }))}
-            className="w-full bg-forge-surface2 border border-forge-border rounded-lg px-3 py-2 text-sm text-forge-text focus:border-forge-cyan/40 outline-none"
-          >
-            {!field.required && <option value="">-- 请选择 --</option>}
-            {field.options.map(opt => (
-              <option key={opt} value={opt}>{opt}</option>
-            ))}
-          </select>
-        </div>
-      );
-    }
-
-    // Default: text / textarea
-    return (
-      <div key={field.name}>
-        <label className="text-xs text-forge-text2 mb-1 block">
-          {field.label} {field.required && <span className="text-red-400">*</span>}
-        </label>
-        <textarea
-          value={value}
-          onChange={e => setFormData(prev => ({ ...prev, [field.name]: e.target.value }))}
-          placeholder={field.placeholder || `请输入${field.label}`}
-          className="w-full bg-forge-surface2 border border-forge-border rounded-lg px-3 py-2 text-sm text-forge-text resize-none h-16 focus:border-forge-cyan/40 outline-none"
-        />
-      </div>
-    );
-  };
 
   /* ── JSX ──────────────────────────────────────────────────── */
 
@@ -453,15 +348,14 @@ export function WorkflowRunner() {
                   <Loader2 size={20} className="animate-spin mx-auto" />
                   <p className="text-xs mt-2">加载工作流参数…</p>
                 </div>
-              ) : exposedFields.length > 0 ? (
+              ) : (
                 <>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {exposedFields.map(field => (
-                      <div key={field.name} className={field.type === 'text' ? 'md:col-span-2' : ''}>
-                        {renderField(field)}
-                      </div>
-                    ))}
-                  </div>
+                  <DynamicTemplateForm
+                    fields={exposedFields}
+                    formData={formData}
+                    onChange={setFormData}
+                    loading={running}
+                  />
 
                   {/* Run button */}
                   <button
@@ -476,10 +370,6 @@ export function WorkflowRunner() {
                     )}
                   </button>
                 </>
-              ) : (
-                <div className="text-center py-8 text-forge-text2/50 text-sm">
-                  该工作流没有可配置的参数
-                </div>
               )}
             </div>
           )}
