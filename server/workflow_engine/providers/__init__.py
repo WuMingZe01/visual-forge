@@ -40,7 +40,12 @@ _runninghub: RunningHubProvider | None = None
 
 
 def get_provider(name: str) -> BaseProvider:
-    """Get a provider instance by name."""
+    """Get a provider instance by name.
+
+    ``"auto"`` defaults to YunwuProvider (the most stable provider).
+    Use ``get_provider_for_model(model_id)`` to pick the best provider
+    for a specific model, and pass that result here.
+    """
     global _yunwu, _grsai, _mimo, _llm, _comfyui, _runninghub
 
     name_lower = name.lower().strip()
@@ -50,10 +55,16 @@ def get_provider(name: str) -> BaseProvider:
             _yunwu = YunwuProvider()
         return _yunwu
 
-    if name_lower in ("grsai", "auto"):
+    if name_lower == "grsai":
         if _grsai is None:
             _grsai = GrsAIProvider()
         return _grsai
+
+    # "auto" — default to Yunwu (most stable, supports all models)
+    if name_lower == "auto":
+        if _yunwu is None:
+            _yunwu = YunwuProvider()
+        return _yunwu
 
     if name_lower == "mimo":
         if _mimo is None:

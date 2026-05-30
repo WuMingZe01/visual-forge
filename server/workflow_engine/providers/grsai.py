@@ -203,7 +203,7 @@ async def _grsai_generate(api_key: str, input_data: dict[str, Any]) -> str:
                 )
                 if resp.status_code == 200:
                     return _parse_grsai_response(resp.text)
-                raw = resp.text[:300]
+                raw = resp.text[:500]
                 if resp.status_code == 429:
                     wait = [5, 10, 20][attempt] if attempt < 3 else 20
                     logger.warning(f"Grsai 429 rate limited, retry {attempt + 1}/3 after {wait}s")
@@ -212,6 +212,13 @@ async def _grsai_generate(api_key: str, input_data: dict[str, Any]) -> str:
                 if resp.status_code >= 500 and attempt < 1:
                     await asyncio.sleep(2)
                     continue
+                # 400-level errors that contain transient messages (load, rate) should be retried
+                if resp.status_code in (400, 502, 503, 504) and is_transient_error(raw):
+                    if attempt < 2:
+                        wait = [3, 8][attempt]
+                        logger.warning(f"Grsai {resp.status_code} transient error, retry {attempt + 1}/3 after {wait}s: {raw[:100]}")
+                        await asyncio.sleep(wait)
+                        continue
                 raise RuntimeError(f"Grsai HTTP {resp.status_code}: {raw}")
         except (httpx.TimeoutException, httpx.ConnectError) as e:
             if attempt < 3:

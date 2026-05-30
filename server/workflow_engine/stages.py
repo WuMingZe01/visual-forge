@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Callable
 
 from .types import PipelineContext, PipelineProgress, NodeOutput
@@ -28,6 +29,9 @@ DEFAULT_PROMPT = (
     "Professional product photo of a fashion item, "
     "clean background, studio lighting, high quality, 8K, commercial photography"
 )
+
+# Pattern for detecting unresolved {{key}} placeholders
+_UNRESOLVED_RE = re.compile(r'\{\{\s*\w+\s*\}\}')
 
 
 # ============================================================================
@@ -93,14 +97,16 @@ async def stage_prepare(ctx: PipelineContext, config: dict[str, Any] | None = No
 
     for node in image_nodes:
         url = node.get("url", "")
-        if url:
+        # Filter out unresolved {{key}} placeholders — these are not real URLs
+        if url and not _UNRESOLVED_RE.search(str(url)):
             ctx.node_outputs[node["id"]] = NodeOutput(
                 node_id=node["id"], node_type="image", result=url,
             )
 
     for node in prompt_nodes:
         text = node.get("text", "")
-        if text:
+        # Filter out unresolved {{key}} placeholders — downstream should use DEFAULT_PROMPT
+        if text and not _UNRESOLVED_RE.search(str(text)):
             ctx.node_outputs[node["id"]] = NodeOutput(
                 node_id=node["id"], node_type="prompt", result=text,
             )
