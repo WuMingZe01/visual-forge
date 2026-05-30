@@ -78,14 +78,17 @@ def _find_nodes_by_type(nodes: list[dict], node_type: str) -> list[dict]:
 # ============================================================================
 
 async def stage_prepare(ctx: PipelineContext, config: dict[str, Any] | None = None) -> None:
-    """Prepare: validate inputs, register image nodes."""
+    """Prepare: validate inputs, register image + prompt nodes."""
     _ = config
     nodes = ctx.runtime_template.get("nodes") or ctx.runtime_template.get("canvas_nodes") or []
     image_nodes = _find_nodes_by_type(nodes, "image")
+    prompt_nodes = _find_nodes_by_type(nodes, "prompt")
+
+    total = len(image_nodes) + len(prompt_nodes)
 
     ctx.on_progress(PipelineProgress(
-        stage="prepare", step=0, total=len(image_nodes),
-        message=f"准备 {len(image_nodes)} 个输入",
+        stage="prepare", step=0, total=total,
+        message=f"准备 {len(image_nodes)} 图片 + {len(prompt_nodes)} 提示词",
     ))
 
     for node in image_nodes:
@@ -95,9 +98,16 @@ async def stage_prepare(ctx: PipelineContext, config: dict[str, Any] | None = No
                 node_id=node["id"], node_type="image", result=url,
             )
 
+    for node in prompt_nodes:
+        text = node.get("text", "")
+        if text:
+            ctx.node_outputs[node["id"]] = NodeOutput(
+                node_id=node["id"], node_type="prompt", result=text,
+            )
+
     ctx.on_progress(PipelineProgress(
-        stage="prepare", step=len(image_nodes), total=len(image_nodes),
-        message=f"就绪 · {len(image_nodes)} 个输入",
+        stage="prepare", step=total, total=total,
+        message=f"就绪 · {len(image_nodes)} 图片 + {len(prompt_nodes)} 提示词",
     ))
 
 
@@ -158,11 +168,15 @@ async def stage_analyze(ctx: PipelineContext, config: dict[str, Any] | None = No
 # Stage 3: Generate (concurrent image generation)
 # ============================================================================
 
+# Node types that are treated as "generators" (produce images)
+GENERATOR_TYPES = {"generator", "msgen", "comfy", "rh", "video", "ltxDirector"}
+
+
 async def stage_generate(ctx: PipelineContext, config: dict[str, Any] | None = None) -> None:
-    """Generate: call image generation providers."""
+    """Generate: call image generation providers for all generator-type nodes."""
     _ = config
     nodes = ctx.runtime_template.get("nodes") or ctx.runtime_template.get("canvas_nodes") or []
-    gen_nodes = _find_nodes_by_type(nodes, "generator")
+    gen_nodes = [n for n in nodes if isinstance(n, dict) and n.get("type") in GENERATOR_TYPES]
 
     if not gen_nodes:
         ctx.on_progress(PipelineProgress(
