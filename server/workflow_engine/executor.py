@@ -142,7 +142,7 @@ class WorkflowExecutor:
                 await engine.run()
                 
                 # Check if all generation nodes failed (W1)
-                GEN_NODE_TYPES = {"generator", "comfy", "rh", "msgen", "video", "ltxDirector"}
+                GEN_NODE_TYPES = {"generator", "msgen"}
                 all_gen_failed = False
                 gen_nodes_found = False
                 for nid, output in task.context.node_outputs.items():

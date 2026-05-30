@@ -58,14 +58,36 @@ async def execute_llm_node(node: dict, ctx: PipelineContext) -> NodeOutput:
     return NodeOutput(node_id=node["id"], node_type="llm", result=result)
 
 
+# Default prompt used when no upstream prompt node is connected
+DEFAULT_PROMPT = (
+    "Professional product photo of a fashion item, "
+    "clean background, studio lighting, high quality, 8K, commercial photography"
+)
+
+# Map of canvas node type → provider name
+PROVIDER_MAP = {
+    "yunwu": "yunwu",
+    "grsai": "grsai",
+    "auto": "yunwu",
+}
+
+
 async def execute_generator_node(node: dict, ctx: PipelineContext) -> NodeOutput:
-    """Execute a generator node."""
+    """
+    Execute a generator-type node (generator / msgen).
+
+    This is the CORE DAG execution logic:
+      1. Traverse upstream connections to gather prompt text and reference images
+      2. Use node.apiProvider to select the correct provider (yunwu / grsai)
+      3. Extract generation params (ratio, resolution) from node properties
+      4. Call Provider.generate() and return the result
+    """
     from .providers import get_provider
 
     provider_name = node.get("apiProvider", "auto")
     provider = get_provider(provider_name)
 
-    # Gather inputs from upstream nodes
+    # ── Step 1: Extract inputs from upstream DAG connections ──
     prompt = ""
     ref_image = None
     connections = ctx.runtime_template.get("connections") or ctx.runtime_template.get("canvas_connections") or []
@@ -81,16 +103,42 @@ async def execute_generator_node(node: dict, ctx: PipelineContext) -> NodeOutput
                     if not prompt:
                         prompt = upstream_output.result or ""
 
+    if not prompt:
+        prompt = node.get("prompt", "") or node.get("text", "") or DEFAULT_PROMPT
+
+    # ── Step 2: Extract generation params from node properties ──
+    ratio = node.get("ratio", "square")
+    resolution = node.get("resolution", "2k")
+    model_id = node.get("model", "") or node.get("modelId", "")
+    width = node.get("width")
+    height = node.get("height")
+
+    # ── Step 3: Call the Provider with extracted params ──
+    logger = __import__('logging').getLogger(__name__)
+    logger.info(
+        f"[DAG] Executing {node['type']} node '{node['id']}': "
+        f"provider={provider_name}, prompt_len={len(prompt)}, "
+        f"ref_image={'yes' if ref_image else 'no'}, ratio={ratio}, resolution={resolution}"
+    )
+
     result = await provider.generate(
         prompt=prompt,
         ref_image_url=ref_image,
-        ratio=node.get("ratio", "square"),
-        resolution=node.get("resolution", "2k"),
+        ratio=ratio,
+        resolution=resolution,
+        model_id=model_id if model_id else None,
+        width=width if width else None,
+        height=height if height else None,
+    )
+
+    logger.info(
+        f"[DAG] Node '{node['id']}' result: success={result.success}, "
+        f"urls={len(result.urls)}, error={result.error[:80] if result.error else ''}"
     )
 
     return NodeOutput(
         node_id=node["id"],
-        node_type="generator",
+        node_type=node.get("type", "generator"),
         result=result.urls if result.success else None,
         error=result.error if not result.success else None,
     )
@@ -137,7 +185,14 @@ NODE_TYPE_MAP: dict[str, dict[str, Any]] = {
         "label": "生图引擎",
         "icon": "🎨",
         "stage": "generate",
-        "description": "调用 Yunwu/Grsai 混合引擎生图",
+        "description": "API 生图节点 — 调用 Yunwu/Grsai 引擎",
+        "handler": execute_generator_node,
+    },
+    "msgen": {
+        "label": "MS生图",
+        "icon": "☁️",
+        "stage": "generate",
+        "description": "ModelScope 生图节点 — 调用 Yunwu/Grsai 引擎",
         "handler": execute_generator_node,
     },
     "output": {

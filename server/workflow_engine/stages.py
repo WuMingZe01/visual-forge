@@ -168,13 +168,23 @@ async def stage_analyze(ctx: PipelineContext, config: dict[str, Any] | None = No
 # Stage 3: Generate (concurrent image generation)
 # ============================================================================
 
-# Node types that are treated as "generators" (produce images)
-GENERATOR_TYPES = {"generator", "msgen", "comfy", "rh", "video", "ltxDirector"}
+# Node types that produce images — dispatched via node_registry handlers
+GENERATOR_TYPES = {"generator", "msgen"}
 
 
 async def stage_generate(ctx: PipelineContext, config: dict[str, Any] | None = None) -> None:
-    """Generate: call image generation providers for all generator-type nodes."""
+    """
+    Generate stage: for each generator-type node, dispatch to its registered handler.
+
+    The handler (defined in node_registry.py) is responsible for:
+      1. Extracting prompt / ref_image from upstream DAG connections
+      2. Resolving provider (yunwu/grsai) from node.apiProvider
+      3. Calling Provider.generate(prompt=..., ref_image_url=..., ratio=..., resolution=...)
+      4. Returning NodeOutput with result URLs or error
+    """
     _ = config
+    from .node_registry import get_node_handler
+
     nodes = ctx.runtime_template.get("nodes") or ctx.runtime_template.get("canvas_nodes") or []
     gen_nodes = [n for n in nodes if isinstance(n, dict) and n.get("type") in GENERATOR_TYPES]
 
@@ -188,7 +198,6 @@ async def stage_generate(ctx: PipelineContext, config: dict[str, Any] | None = N
     total_tasks = len(gen_nodes)
     completed_count = 0
     completed_lock = asyncio.Lock()
-
     sem = asyncio.Semaphore(concurrency)
 
     ctx.on_progress(PipelineProgress(
@@ -196,7 +205,7 @@ async def stage_generate(ctx: PipelineContext, config: dict[str, Any] | None = N
         message=f"{concurrency}路并发 · 生图中",
     ))
 
-    async def run_gen(node: dict) -> None:
+    async def run_one(node: dict) -> None:
         nonlocal completed_count
 
         if ctx.abort_ref.get("current", False):
@@ -204,89 +213,56 @@ async def stage_generate(ctx: PipelineContext, config: dict[str, Any] | None = N
 
         async with sem:
             node_type = node.get("type", "generator")
+            handler = get_node_handler(node_type)
+
+            if handler is None:
+                logger.warning(f"No handler registered for node type '{node_type}' ({node['id']})")
+                async with completed_lock:
+                    completed_count += 1
+                return
 
             try:
-                # ── ComfyUI path: full workflow JSON → ComfyUI API ──
-                if node_type == "comfy":
-                    provider = get_provider("comfyui")
-                    workflow_json = node.get("workflow_json") or node.get("comfyWorkflowJson") or {}
-                    comfy_name = node.get("comfyWorkflow", "")
-                    if comfy_name and not workflow_json:
-                        try:
-                            import json as _json, os as _os
-                            wf_path = _os.path.join("data", "workflows", f"{comfy_name}.json")
-                            if _os.path.exists(wf_path):
-                                with open(wf_path, "r", encoding="utf-8") as _f:
-                                    workflow_json = _json.load(_f)
-                        except Exception:
-                            pass
-                    result = await provider.generate(
-                        prompt="",
-                        workflow_json=workflow_json,
-                        client_id=f"vf-{node['id']}",
-                    )
-                    logger.info(f"[ComfyUI] Node {node['id']}: success={result.success}, urls={len(result.urls)}")
+                output: NodeOutput = await handler(node, ctx)
 
-                # ── RunningHub path ──
-                elif node_type == "rh":
-                    provider = get_provider("runninghub")
-                    workflow_id = node.get("workflowId") or node.get("rhWorkflowId", "")
-                    result = await provider.generate(
-                        prompt="",
-                        workflow_id=workflow_id,
-                        workflow_json=node.get("workflow_json") or {},
-                    )
-                    logger.info(f"[RunningHub] Node {node['id']}: success={result.success}, urls={len(result.urls)}")
+                async with completed_lock:
+                    completed_count += 1
+                    current = completed_count
 
-                # ── VF standard path (yunwu/grsai) ──
+                if output and output.result is not None:
+                    ctx.node_outputs[node["id"]] = output
+                    ctx.on_progress(PipelineProgress(
+                        stage="generate", step=current, total=total_tasks,
+                        message=f"生图 {current}/{total_tasks}",
+                    ))
+                    # Store in _results for backward compatibility
+                    urls = output.result if isinstance(output.result, list) else [output.result]
+                    entry = ctx.runtime_template.setdefault("_results", {})
+                    entry.setdefault(node["id"], {"urls": [], "error": ""})
+                    entry[node["id"]]["urls"].extend(urls)
+                    ctx.on_row_result(node["id"], urls, [])
                 else:
-                    provider_name = node.get("apiProvider", "auto")
-                    provider = get_provider(provider_name)
-
-                    prompt = ""
-                    ref_image = None
-                    connections = ctx.runtime_template.get("connections") or ctx.runtime_template.get("canvas_connections") or []
-                    for conn in connections:
-                        if conn.get("to") == node["id"]:
-                            upstream_output = ctx.node_outputs.get(conn["from"])
-                            if upstream_output:
-                                if upstream_output.node_type == "prompt":
-                                    prompt = upstream_output.result or ""
-                                elif upstream_output.node_type == "image":
-                                    ref_image = upstream_output.result
-                                elif upstream_output.node_type == "llm":
-                                    if not prompt:
-                                        prompt = upstream_output.result or ""
-
-                    if not prompt:
-                        prompt = DEFAULT_PROMPT
-
-                    result = await provider.generate(
-                        prompt=prompt,
-                        ref_image_url=ref_image,
-                        ratio=node.get("ratio", "square"),
-                        resolution=node.get("resolution", "2k"),
+                    err = output.error if output else "handler returned None"
+                    ctx.node_outputs[node["id"]] = NodeOutput(
+                        node_id=node["id"], node_type=node_type,
+                        result=None, error=err,
                     )
-                    logger.info(f"[VF] Node {node['id']}: success={result.success}, urls={len(result.urls)}")
+                    ctx.on_row_result(node["id"], [], [err])
 
             except Exception as e:
                 if ctx.abort_ref.get("current", False):
                     return
-
                 async with completed_lock:
                     completed_count += 1
 
-                err_msg = str(e)[:80]
-                logger.warning(f"Generation failed for node {node['id']}: {err_msg}")
-
+                err_msg = str(e)[:120]
+                logger.warning(f"Generation failed for node {node['id']} (type={node_type}): {err_msg}")
                 ctx.node_outputs[node["id"]] = NodeOutput(
                     node_id=node["id"], node_type=node_type,
                     result=None, error=err_msg,
                 )
-
                 ctx.on_row_result(node["id"], [], [err_msg])
 
-    await asyncio.gather(*[run_gen(n) for n in gen_nodes])
+    await asyncio.gather(*[run_one(n) for n in gen_nodes])
 
     ctx.on_progress(PipelineProgress(
         stage="generate", step=total_tasks, total=total_tasks,
