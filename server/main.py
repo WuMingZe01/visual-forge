@@ -1,13 +1,27 @@
+import os
+import sys
+from pathlib import Path
+
+# Load .env before anything else
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).resolve().parent / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path)
+    _env_parent = Path(__file__).resolve().parent.parent / ".env"
+    if _env_parent.exists():
+        load_dotenv(_env_parent, override=False)
+except ImportError:
+    pass
+
 import json
 import uuid
 import base64
 import urllib.request
 import urllib.parse
 import urllib.error
-import os
 import re
 import random
-import sys
 import subprocess
 import time
 import shutil

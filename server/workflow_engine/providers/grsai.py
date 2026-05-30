@@ -227,14 +227,35 @@ async def _grsai_generate(api_key: str, input_data: dict[str, Any]) -> str:
 # ============================================================================
 
 def _resolve_dimensions(ratio: str, resolution: str) -> tuple[int, int]:
-    """Convert ratio+resolution to concrete width/height."""
-    base = {"1k": 1024, "2k": 2048, "4k": 4096}.get(resolution, 2048)
+    """Convert ratio+resolution to concrete width/height. Handles labeled values."""
+    # Strip labels: "1:1 (淘宝主图)" → "1:1", "2K (2048px·推荐)" → "2k"
+    import re as _re
+    res_raw = resolution.split("(")[0].strip().lower().replace(" ", "") if resolution else "2k"
+    ratio_raw = ratio.split("(")[0].strip().lower().replace(" ", "") if ratio else "square"
+
+    # Parse resolution: "2k" → 2048, "1k" → 1024, "4k" → 4096
+    base_map = {"1k": 1024, "2k": 2048, "4k": 4096}
+    base = 2048
+    for k, v in base_map.items():
+        if res_raw.startswith(k):
+            base = v
+            break
+
+    # Parse ratio: "1:1" → square, "3:4" → portrait, "4:3"/"16:9"/"9:16" → specific
+    if ":" in ratio_raw:
+        parts = ratio_raw.split(":")
+        w_r = int(parts[0]) if parts[0].isdigit() else 1
+        h_r = int(parts[1]) if parts[1].isdigit() else 1
+        short = min(base // max(w_r, h_r) * w_r, base // max(w_r, h_r) * h_r)
+        return (short * w_r, short * h_r)
+
+    # Legacy named ratios
     ratios = {
         "square": (base, base),
         "portrait": (int(base * 0.75), base),
         "landscape": (base, int(base * 0.75)),
     }
-    return ratios.get(ratio, (base, base))
+    return ratios.get(ratio_raw, (base, base))
 
 
 # ============================================================================
