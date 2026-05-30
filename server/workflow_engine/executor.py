@@ -164,7 +164,14 @@ class WorkflowExecutor:
 
                 if all_gen_failed:
                     task.status = TaskStatus.FAILED
-                    task.error = "所有生成节点均失败"
+                    # Collect actual error messages from failed nodes
+                    errors = []
+                    for nid, out in task.context.node_outputs.items():
+                        if nid.startswith("__"):
+                            continue
+                        if out.node_type in GEN_NODE_TYPES and out.error:
+                            errors.append(f"[{nid}] {out.error[:120]}")
+                    task.error = "所有生成节点均失败: " + ("; ".join(errors) if errors else "未知错误")
                 else:
                     task.status = TaskStatus.COMPLETED
                 # Extract results from node_outputs (new architecture)
