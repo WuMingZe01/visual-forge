@@ -76,9 +76,22 @@ class WorkflowTask:
             final = self.context.node_outputs.get('__final__')
             has_result = final is not None and final.result is not None
 
+        # Collect dynamic inputs (user-facing parameters)
+        dynamic_inputs = {}
+        if self.context and hasattr(self.context, 'dynamic_inputs'):
+            dynamic_inputs = self.context.dynamic_inputs or {}
+
+        # Extract template name and description
+        template_name = self.workflow_name
+        template_desc = ""
+        if self.workflow_config:
+            template_desc = getattr(self.workflow_config, 'description', '') or ''
+
         return {
             "task_id": self.task_id,
             "workflow_name": self.workflow_name,
+            "template_name": template_name,
+            "template_description": template_desc,
             "status": self.status.value,
             "created_at": datetime.fromtimestamp(self.created_at).isoformat(),
             "started_at": datetime.fromtimestamp(self.started_at).isoformat() if self.started_at else None,
@@ -87,6 +100,7 @@ class WorkflowTask:
             "error": self.error,
             "has_result": has_result,
             "result": result_data,
+            "dynamic_inputs": dynamic_inputs,
             "enabled_stages": [s.id for s in self.workflow_config.stages if s.enabled] if self.workflow_config else [],
         }
 

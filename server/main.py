@@ -7115,6 +7115,124 @@ async def run_pipeline_from_canvas(request: Request):
     return {"task_id": task.task_id, "status": task.status.value}
 
 
+# ============================================================================
+# 桥接端点：将旧模块（主图/姿势/详情）的请求格式转换为工作流执行
+# ============================================================================
+
+class TryOnBridgeRequest(BaseModel):
+    """旧版试衣生图请求 → 转换为工作流执行"""
+    # 核心参数
+    product_image_url: str = ""     # 商品白底图
+    model_image_url: str = ""       # 模特参考图
+    prompt: str = ""                # 生图提示词
+    # 引擎参数
+    provider: str = "auto"          # yunwu / grsai / auto
+    model_id: str = "gpt-image-2"   # 模型ID
+    ratio: str = "1:1 (淘宝主图)"   # 出图比例
+    resolution: str = "2K (2048px·推荐)"  # 画质
+    width: int = 0
+    height: int = 0
+    # 多图参数
+    style_ref_url: str = ""         # 风格参考图
+    count: int = 1                  # 生成数量
+    # 模板选择
+    template_id: str = ""           # 指定模板，空则自动选择
+    # 额外参数
+    extra_params: dict = {}
+
+    model_config = {"extra": "allow"}
+
+
+@app.post("/api/vf/tryon/generate")
+async def tryon_via_workflow(request: Request):
+    """
+    旧版试衣模块通过工作流引擎生图的桥接端点。
+
+    支持 StudioTryOn、PoseGenerate、DetailGenerate 等旧模块。
+    自动将旧格式参数转换为 dynamic_inputs，路由到预设工作流模板。
+    """
+    from workflow_engine.injector import inject_parameters, InjectionError
+    from workflow_engine.types import PipelineContext, WorkflowConfig, StageConfig
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的 JSON 请求体")
+
+    # 确定模板：优先使用指定模板，否则根据参数自动选择
+    template_id = body.get("template_id", "")
+    if not template_id:
+        # 自动选择：有模特图+商品图 → 主图批量，仅商品图 → 快速生图
+        has_model = bool(body.get("model_image_url", ""))
+        has_product = bool(body.get("product_image_url", ""))
+        if has_model and has_product:
+            template_id = "主图批量生成"
+        elif body.get("prompt", ""):
+            template_id = "快速生图"
+        else:
+            template_id = "简易批量生成"
+
+    template = WORKFLOW_PRESETS.get(template_id) or _get_saved_workflow(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail=f"工作流不存在: {template_id}")
+
+    # 构建 dynamic_inputs — 将旧格式映射到占位符
+    dynamic_inputs: dict[str, Any] = {}
+    dynamic_inputs["user_prompt"] = body.get("prompt", "")
+    dynamic_inputs["product_image"] = body.get("product_image_url", "")
+    dynamic_inputs["ref_image"] = body.get("model_image_url", "") or body.get("product_image_url", "")
+    dynamic_inputs["template_image"] = body.get("model_image_url", "")
+    dynamic_inputs["detail_image"] = body.get("product_image_url", "")
+    dynamic_inputs["api_provider"] = body.get("provider", "auto")
+    dynamic_inputs["model_id"] = body.get("model_id", "gpt-image-2")
+    dynamic_inputs["aspect_ratio"] = body.get("ratio", "1:1 (淘宝主图)")
+    dynamic_inputs["resolution"] = body.get("resolution", "2K (2048px·推荐)")
+
+    # 合并额外参数
+    extra_params = body.get("extra_params", {})
+    if isinstance(extra_params, dict):
+        dynamic_inputs.update(extra_params)
+
+    # Count > 1 → submit multiple tasks
+    count = max(1, int(body.get("count", 1)))
+
+    # 参数注入
+    try:
+        runtime = inject_parameters(template, dynamic_inputs)
+    except InjectionError as e:
+        raise HTTPException(status_code=400, detail=f"参数注入失败: {e}")
+
+    opts = template.get("options", {})
+    config = WorkflowConfig(
+        name=template.get("name", template_id),
+        description=template.get("description", ""),
+        stages=[StageConfig(id=s["id"], enabled=s.get("enabled", True), config=s.get("config")) for s in template.get("stages", [])],
+        options=opts,
+        exposed_mapping=template.get("exposed_mapping", {}),
+    )
+
+    # 提交执行（支持 count > 1 批量）
+    executor = get_executor(max_concurrent=count)
+    task_ids = []
+    for i in range(count):
+        ctx = PipelineContext(
+            runtime_template=runtime,
+            dynamic_inputs=dynamic_inputs,
+            generate_concurrency=opts.get("generateConcurrency", 4),
+            generate_timeout_ms=opts.get("generateTimeoutMs", 480000),
+        )
+        task = await executor.submit(f"{config.name}#{i+1}" if count > 1 else config.name, config, ctx)
+        task_ids.append(task.task_id)
+
+    return {
+        "task_ids": task_ids,
+        "workflow_name": config.name,
+        "template_id": template_id,
+        "status": "submitted",
+        "count": count,
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=3000)

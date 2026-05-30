@@ -6,6 +6,7 @@ import {
   Settings, Edit3, Workflow
 } from 'lucide-react';
 import { useWorkflowStore } from '@/store/useWorkflowStore';
+import { useTaskHistoryStore } from '@/store/useTaskHistoryStore';
 import { DynamicTemplateForm, type ExposedField } from '@/components/DynamicTemplateForm';
 
 interface WorkflowTemplate {
@@ -44,6 +45,7 @@ const API = '';
 export function WorkflowRunner() {
   const navigate = useNavigate();
   const { refreshTick, setWorkflows, setPendingWorkflow } = useWorkflowStore();
+  const { addTask } = useTaskHistoryStore();
 
   const [workflows, setLocalWorkflows] = useState<WorkflowTemplate[]>([]);
   const [selected, setSelected] = useState<WorkflowTemplate | null>(null);
@@ -146,6 +148,24 @@ export function WorkflowRunner() {
           setActiveStageIdx(-1);
           refreshTasks();
           console.log(`[VF] Task ${taskId} completed in ${task.duration_seconds?.toFixed(1)}s`);
+          // Save to task history
+          addTask({
+            id: task.task_id,
+            type: 'tryon',
+            skuCode: '',
+            productName: task.workflow_name || '',
+            modelId: (task as any).dynamic_inputs?.model_id || '',
+            provider: (task as any).dynamic_inputs?.api_provider || 'auto',
+            prompt: (task as any).dynamic_inputs?.user_prompt || '',
+            params: (task as any).dynamic_inputs || {},
+            status: 'completed',
+            progress: 100,
+            resultUrls: extractResultUrls(task),
+            referenceUrls: [],
+            error: '',
+            createdAt: task.created_at || new Date().toISOString(),
+            completedAt: task.completed_at,
+          });
         }
 
         if (task.status === 'failed') {
@@ -158,6 +178,24 @@ export function WorkflowRunner() {
           console.error(`[VF] Task ${taskId} FAILED:`, errMsg);
           console.error('[VF] Full task data:', JSON.stringify(task, null, 2));
           setError(errMsg);
+          // Save to task history
+          addTask({
+            id: task.task_id,
+            type: 'tryon',
+            skuCode: '',
+            productName: task.workflow_name || '',
+            modelId: (task as any).dynamic_inputs?.model_id || '',
+            provider: (task as any).dynamic_inputs?.api_provider || 'auto',
+            prompt: (task as any).dynamic_inputs?.user_prompt || '',
+            params: (task as any).dynamic_inputs || {},
+            status: 'failed',
+            progress: 0,
+            resultUrls: [],
+            referenceUrls: [],
+            error: errMsg,
+            createdAt: task.created_at || new Date().toISOString(),
+            completedAt: task.completed_at,
+          });
         }
       } catch (e: any) {
         console.error('[VF] Poll error:', e);
@@ -240,6 +278,19 @@ export function WorkflowRunner() {
       prepare: '准备', analyze: 'AI分析', generate: '生图', validate: '校验', finalize: '输出',
     };
     return map[id] || id;
+  };
+
+  const extractResultUrls = (task: any): string[] => {
+    if (!task.result) return [];
+    const urls: string[] = [];
+    if (task.result.images) return task.result.images;
+    if (task.result.row_results) {
+      for (const val of Object.values(task.result.row_results) as any[]) {
+        if (val?.urls) urls.push(...val.urls);
+      }
+    }
+    if (task.result.urls) urls.push(...task.result.urls);
+    return urls;
   };
 
   const statusIcon = (s: string) => {
