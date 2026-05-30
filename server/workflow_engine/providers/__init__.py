@@ -45,12 +45,12 @@ def get_provider(name: str) -> BaseProvider:
 
     name_lower = name.lower().strip()
 
-    if name_lower in ("yunwu", "auto"):
+    if name_lower == "yunwu":
         if _yunwu is None:
             _yunwu = YunwuProvider()
         return _yunwu
 
-    if name_lower == "grsai":
+    if name_lower in ("grsai", "auto"):
         if _grsai is None:
             _grsai = GrsAIProvider()
         return _grsai

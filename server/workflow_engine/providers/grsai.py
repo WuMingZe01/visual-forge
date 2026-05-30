@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from .base import BaseProvider, ProviderResult
-from .key_pool import KeyPool, merge_pool, acquire_key, release_key, _pool_for
+from .key_pool import KeyPool, merge_pool, acquire_key, release_key, _pool_for, _grsai_pool
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 # Configuration (from env with existing defaults)
 # ============================================================================
 
-GRSAI_BASE_URL = "https://grsai.dakka.com.cn"
+# API base: use Vite proxy in dev (http://localhost:5174/grsai), override for production
+GRSAI_BASE_URL = os.getenv("GRSAI_BASE_URL", "http://localhost:5174/grsai")
 GRSAI_API_KEYS: list[str] = [
     os.getenv("GRSAI_KEY_1", "sk-ffb3791c8358419c931c85ba179abe8c"),
 ]
@@ -38,11 +39,12 @@ GRSAI_TIMEOUT = 180.0
 DEFAULT_WIDTH = 2448
 DEFAULT_HEIGHT = 3264
 
-# ============================================================================
-# Internal Key Pool
-# ============================================================================
+# ============================================================================#
+# Internal Key Pool — USE SHARED POOL FROM key_pool.py
+# ============================================================================#
 
-_pool = KeyPool(provider="grsai")
+# Use the global _grsai_pool from key_pool.py (not a local copy!)
+_pool = _grsai_pool
 
 
 def _sync_pool() -> None:

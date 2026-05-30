@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from .base import BaseProvider, ProviderResult
-from .key_pool import KeyPool, KeyState, merge_pool, acquire_key, release_key, _pool_for
+from .key_pool import KeyPool, KeyState, merge_pool, acquire_key, release_key, _pool_for, _yunwu_pool
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +27,10 @@ logger = logging.getLogger(__name__)
 # Configuration (from env with existing defaults)
 # ============================================================================
 
-YUNWU_EDITS_URL = "https://yunwu.ai/v1/images/edits"
-YUNWU_GEN_URL = "https://yunwu.ai/v1/images/generations"
+# API base: use Vite proxy in dev (http://localhost:5174/yunwu), override for production
+_YUNWU_BASE = os.getenv("YUNWU_BASE_URL", "http://localhost:5174/yunwu")
+YUNWU_EDITS_URL = f"{_YUNWU_BASE}/v1/images/edits"
+YUNWU_GEN_URL = f"{_YUNWU_BASE}/v1/images/generations"
 YUNWU_API_KEYS: list[str] = [
     os.getenv("YUNWU_KEY_1", "sk-74BktqxG1rp1GIgwKSGuUBxQ7VkcOoihaMMAY8aKPSXrhvaS"),
     os.getenv("YUNWU_KEY_2", "sk-nK9OjOknKFbD9DloLnM1upgxtDw7vJ8JeqJ03CObx4e1mPTM"),
@@ -42,11 +44,12 @@ YUNWU_TIMEOUT = 180.0
 DEFAULT_WIDTH = 2448
 DEFAULT_HEIGHT = 3264
 
-# ============================================================================
-# Internal Key Pool
-# ============================================================================
+# ============================================================================#
+# Internal Key Pool — USE SHARED POOL FROM key_pool.py
+# ============================================================================#
 
-_pool = KeyPool(provider="yunwu")
+# Use the global _yunwu_pool from key_pool.py (not a local copy!)
+_pool = _yunwu_pool
 
 
 def _sync_pool() -> None:
@@ -153,7 +156,7 @@ async def _yunwu_gen_request(
             async with httpx.AsyncClient(timeout=timeout) as client:
                 if "files" in payload:
                     # FormData request (edits endpoint)
-                    del headers["Content-Type"]  # Let httpx set multipart boundary
+                    headers.pop("Content-Type", None)  # Let httpx set multipart boundary
                     resp = await client.post(endpoint, headers=headers, files=payload["files"])
                 else:
                     headers["Content-Type"] = "application/json"
@@ -333,7 +336,15 @@ class YunwuProvider(BaseProvider):
 
         key = acquire_key(pool)
         try:
-            if model_id == "gpt-image-2-all":
+            # Route: use /edits only when there are actual reference images
+            has_refs = any([
+                input_data.get("modelImageBase64"),
+                input_data.get("productImageBase64"),
+                input_data.get("styleRefBase64"),
+                input_data.get("detailImageBase64"),
+                ref_image_url,
+            ])
+            if has_refs:
                 url = await _yunwu_edits(key, input_data)
             else:
                 url = await _yunwu_generate(key, input_data)
