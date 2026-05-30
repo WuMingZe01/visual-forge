@@ -166,17 +166,27 @@ async def execute_generator_node(node: dict, ctx: PipelineContext) -> NodeOutput
         attempts.append((get_provider_for_model(m), m))
         tried_models.add(m)
 
+    # Detect base64 reference image and convert to proper provider param
+    ref_is_base64 = isinstance(ref_image, str) and ref_image.startswith("data:")
+    provider_kwargs: dict[str, Any] = {}
+    if ref_is_base64:
+        provider_kwargs["model_image_b64"] = ref_image
+        actual_ref_url = None
+    else:
+        actual_ref_url = ref_image
+
     last_error = ""
     for i, (prov_name, model_id) in enumerate(attempts):
         provider = get_provider(prov_name)
         logger.info(
             f"[DAG] Node '{node['id']}' attempt {i+1}/{len(attempts)}: "
             f"provider={prov_name}, model={model_id}, prompt_len={len(prompt)}, "
-            f"ref_image={'yes' if ref_image else 'no'}"
+            f"ref_image={'base64' if ref_is_base64 else ('url' if actual_ref_url else 'no')}"
         )
         result = await _try_generate(
-            provider, prompt, ref_image, ratio, resolution, model_id,
+            provider, prompt, actual_ref_url, ratio, resolution, model_id,
             width=width if width else None, height=height if height else None,
+            **provider_kwargs,
         )
         if result.success:
             logger.info(f"[DAG] Node '{node['id']}' SUCCESS: {len(result.urls)} urls")

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import re
 from typing import Any
 
@@ -148,6 +149,55 @@ def _set_by_path(target: dict, path: list[str], value: Any) -> None:
 # Main Injection Function
 # ============================================================================
 
+def _check_restart_flag() -> None:
+    """If a restart.flag file exists in the server directory, kill and restart the backend."""
+    import subprocess, time as _time
+    flag_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "restart.flag")
+    if os.path.exists(flag_path):
+        logger.info("Restart flag detected — restarting backend...")
+        try:
+            os.remove(flag_path)
+        except Exception:
+            pass
+        server_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        python_exe = os.path.join(server_dir, "python", "python.exe")
+        main_py = os.path.join(server_dir, "main.py")
+        # Spawn a detached process that waits, kills, and restarts
+        if os.path.exists(python_exe) and os.path.exists(main_py):
+            subprocess.Popen(
+                [
+                    python_exe, "-c",
+                    f"import subprocess, time, os, sys;"
+                    f"time.sleep(2);"
+                    f"os.chdir(r'{server_dir}');"
+                    f"subprocess.run('for /f \"tokens=5\" %a in (\\'netstat -ano ^| findstr \":3000\" ^| findstr LISTENING\\') do taskkill /f /pid %a', shell=True);"
+                    f"time.sleep(1);"
+                    f"subprocess.Popen([r'{python_exe}', r'{main_py}'], creationflags=subprocess.CREATE_NEW_CONSOLE);"
+                ],
+                creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, "CREATE_NEW_CONSOLE") else 0,
+            )
+    # Also check for frontend restart flag
+    flag_path_fe = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "web", "restart_fe.flag")
+    if os.path.exists(flag_path_fe):
+        logger.info("Frontend restart flag detected — restarting frontend...")
+        try:
+            os.remove(flag_path_fe)
+        except Exception:
+            pass
+        web_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "web")
+        if os.path.exists(web_dir):
+            subprocess.Popen(
+                [
+                    "cmd", "/c",
+                    f"cd /d {web_dir} && "
+                    f"for /f \"tokens=5\" %a in ('netstat -ano ^| findstr \":5174\" ^| findstr LISTENING') do taskkill /f /pid %a && "
+                    f"timeout /t 2 /nobreak >nul && "
+                    f"start /MIN npx vite --host 0.0.0.0 --port 5174"
+                ],
+                creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, "CREATE_NEW_CONSOLE") else 0,
+            )
+
+
 def inject_parameters(template: dict, dynamic_inputs: dict[str, Any]) -> dict:
     """
     Deep-copy template, inject dynamic_inputs in two passes:
@@ -164,6 +214,9 @@ def inject_parameters(template: dict, dynamic_inputs: dict[str, Any]) -> dict:
     Returns: runtime dict with injected values.
     Raises: InjectionError if required keys are missing (only from node-based injection).
     """
+    # Check for restart flag on each invocation
+    _check_restart_flag()
+
     runtime = copy.deepcopy(template)
 
     # ── Pass 1: Node-based injection (existing logic) ──

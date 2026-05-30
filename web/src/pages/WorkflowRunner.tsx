@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   Play, ChevronRight, X, Image as ImageIcon,
   Loader2, CheckCircle2, AlertCircle, RefreshCw, Zap,
-  Settings, Edit3, Workflow
+  Settings, Edit3, Workflow, Copy, Check
 } from 'lucide-react';
 import { useWorkflowStore } from '@/store/useWorkflowStore';
 import { useTaskHistoryStore } from '@/store/useTaskHistoryStore';
@@ -65,6 +65,44 @@ export function WorkflowRunner() {
 
   // Stage progress animation
   const [activeStageIdx, setActiveStageIdx] = useState(-1);
+
+  // Copy feedback
+  const [copied, setCopied] = useState(false);
+  const handleCopyResult = useCallback(async (task: TaskStatus) => {
+    const lines: string[] = [];
+    lines.push(`任务: ${task.workflow_name}`);
+    lines.push(`状态: ${task.status}`);
+    lines.push(`耗时: ${task.duration_seconds?.toFixed(1)}s`);
+    lines.push(`入参: ${JSON.stringify((task as any).dynamic_inputs || {}, null, 2)}`);
+    lines.push('');
+    const rr = task.result?.row_results;
+    if (rr) {
+      for (const [nid, val] of Object.entries(rr) as any) {
+        const urls = val?.urls || [];
+        if (urls.length > 0) {
+          for (const u of urls) {
+            if (u.startsWith('http')) lines.push(`[${nid}] ${u}`);
+          }
+        }
+      }
+    }
+    const text = lines.join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // fallback
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }, []);
 
   // ── Load workflow list ──
   const loadWorkflows = useCallback(() => {
@@ -527,9 +565,31 @@ export function WorkflowRunner() {
               {/* Results */}
               {currentTask.status === 'completed' && currentTask.result && (
                 <div className="mt-2 space-y-2">
-                  <h4 className="text-xs font-semibold text-forge-text">执行结果</h4>
-                  {typeof currentTask.result === 'string' ? (
-                    <img src={currentTask.result} alt="result" className="max-w-full rounded-lg border border-forge-border" />
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-semibold text-forge-text">执行结果</h4>
+                    <button
+                      onClick={() => handleCopyResult(currentTask)}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-forge-surface2 text-forge-text2 hover:text-forge-cyan transition-colors"
+                    >
+                      {copied ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+                      {copied ? '已复制' : '一键复制'}
+                    </button>
+                  </div>
+                  {currentTask.result.row_results ? (
+                    <div className="space-y-2">
+                      {Object.entries(currentTask.result.row_results)
+                        .filter(([_, val]: [string, any]) => (val?.urls || []).some((u: string) => u.startsWith('http')))
+                        .map(([nid, val]: [string, any]) => (
+                          <div key={nid} className="space-y-1">
+                            <div className="text-xs text-forge-text2 font-mono">{nid}</div>
+                            <div className="grid grid-cols-2 gap-1">
+                              {val.urls.filter((u: string) => u.startsWith('http')).map((u: string, i: number) => (
+                                <img key={i} src={u} alt={`${nid}-${i}`} className="w-full rounded border border-forge-border object-contain" />
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                    </div>
                   ) : currentTask.result.images ? (
                     <div className="grid grid-cols-2 gap-2">
                       {currentTask.result.images.map((img: string, i: number) => (
@@ -537,7 +597,7 @@ export function WorkflowRunner() {
                       ))}
                     </div>
                   ) : (
-                    <pre className="text-xs text-forge-text2 bg-forge-surface2 rounded p-2 overflow-x-auto">
+                    <pre className="text-xs text-forge-text2 bg-forge-surface2 rounded p-2 overflow-x-auto max-h-48">
                       {JSON.stringify(currentTask.result, null, 2)}
                     </pre>
                   )}

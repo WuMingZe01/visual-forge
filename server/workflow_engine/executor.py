@@ -81,6 +81,33 @@ class WorkflowTask:
         if self.context and hasattr(self.context, 'dynamic_inputs'):
             dynamic_inputs = self.context.dynamic_inputs or {}
 
+        # Build per-node execution trace
+        node_trace = {}
+        if self.context and hasattr(self.context, 'node_outputs'):
+            for nid, out in self.context.node_outputs.items():
+                if nid.startswith("__"):
+                    continue
+                entry: dict[str, Any] = {
+                    "node_type": out.node_type,
+                    "has_result": out.result is not None,
+                }
+                if out.result is not None:
+                    res = out.result
+                    if isinstance(res, list):
+                        # Only show http URLs, truncate base64
+                        clean = [str(r)[:120] for r in res if isinstance(r, str) and (r.startswith("http") or len(str(r)) < 200)]
+                        entry["result_preview"] = clean if clean else [f"base64({len(str(res[0]))} chars)" if res else "empty"]
+                    elif isinstance(res, str):
+                        if res.startswith("http"):
+                            entry["result_preview"] = [res[:120]]
+                        elif len(res) > 200:
+                            entry["result_preview"] = [f"base64({len(res)} chars)"]
+                        else:
+                            entry["result_preview"] = [res[:120]]
+                if out.error:
+                    entry["error"] = out.error[:200]
+                node_trace[nid] = entry
+
         # Extract template name and description
         template_name = self.workflow_name
         template_desc = ""
@@ -101,6 +128,7 @@ class WorkflowTask:
             "has_result": has_result,
             "result": result_data,
             "dynamic_inputs": dynamic_inputs,
+            "node_trace": node_trace,
             "enabled_stages": [s.id for s in self.workflow_config.stages if s.enabled] if self.workflow_config else [],
         }
 
@@ -186,16 +214,21 @@ class WorkflowExecutor:
                 else:
                     task.status = TaskStatus.COMPLETED
 
-                # ── Extract results ──
+                # ── Extract results (only generator nodes, filter base64) ──
                 results = {}
                 for nid, output in task.context.node_outputs.items():
                     if nid.startswith("__"):
                         continue
                     if output.result is not None:
-                        results[nid] = {
-                            "urls": output.result if isinstance(output.result, list) else [output.result],
-                            "error": output.error or "",
-                        }
+                        urls = output.result if isinstance(output.result, list) else [output.result]
+                        # Filter: only keep http/https URLs (exclude base64, placeholders, plain text)
+                        clean_urls = [u for u in urls if isinstance(u, str) and u.startswith("http")]
+                        if clean_urls:
+                            results[nid] = {
+                                "urls": clean_urls,
+                                "node_type": output.node_type,
+                                "error": output.error or "",
+                            }
                 # Backward compat
                 tmpl_results = task.context.runtime_template.get("_results", {})
                 for rid, r in tmpl_results.items():
