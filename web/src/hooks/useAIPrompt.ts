@@ -1,7 +1,7 @@
 /**
  * AI提示词生成Hook - 两阶段LLM处理
- * 有白底图时：Kimi 双图分析（模特+白底）→ DeepSeek 整合
- * 无白底图时：Kimi 单图分析（仅模特）→ DeepSeek 生成
+ * 有白底图时：AI 双图分析（模特+白底）→ DeepSeek 整合
+ * 无白底图时：AI 单图分析（仅模特）→ DeepSeek 生成
  */
 import { useState, useCallback } from 'react';
 import { useLlmStore } from '@/store/useLlmStore';
@@ -68,7 +68,7 @@ export function useAIPrompt() {
 
         if (hasProductImg) {
           // 有白底图 → 双图分析（用 analyzeBoth 模板，详细提取模特不变特征+服装细节）
-          setSteps([{ step: 'Step 1: Kimi 双图分析 — 提取模特不变特征 + 服装视觉细节', status: 'running' }]);
+          setSteps([{ step: 'Step 1: AI 双图分析 — 提取模特不变特征 + 服装视觉细节', status: 'running' }]);
 
           const productFile = await blobUrlToFile(productImage!.previewUrl, productImage!.name);
           const productB64 = await compressImageForLLM(productFile);
@@ -83,7 +83,7 @@ export function useAIPrompt() {
           ]);
         } else {
           // 无白底图：只分析模特图
-          setSteps([{ step: 'Step 1: Kimi 分析模特图 → 提取不变特征', status: 'running' }]);
+          setSteps([{ step: 'Step 1: AI 分析模特图 → 提取不变特征', status: 'running' }]);
 
           invariantFeats = await analyzeModelImage(visionModel, modelB64);
 

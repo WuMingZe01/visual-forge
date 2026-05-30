@@ -2,7 +2,6 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { Layout } from '@/components/Layout';
 import { StyleManage } from '@/pages/StyleManage';
 import { StudioTryOn } from '@/pages/StudioTryOn';
-import { DetailCanvas } from '@/pages/DetailCanvas';
 import { SettingsPage } from '@/pages/SettingsPage';
 import { GeneralStudio } from '@/pages/GeneralStudio';
 import { TaskHistoryPage } from '@/pages/TaskHistoryPage';
@@ -13,6 +12,10 @@ import { ModelLibrary } from '@/pages/ModelLibrary';
 import { TemplateLibrary } from '@/pages/TemplateLibrary';
 import { PoseGenerate } from '@/pages/PoseGenerate';
 import { DetailGenerate } from '@/pages/DetailGenerate';
+import { WhiteBgTool } from '@/pages/WhiteBgTool';
+import { PipelineMonitor } from '@/pages/PipelineMonitor';
+import { ViewAngleTool } from '@/pages/ViewAngleTool';
+import { WorkflowRunner } from '@/pages/WorkflowRunner';
 import { ToastContainer } from '@/components/Toast';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { useThemeStore } from '@/store/useThemeStore';
@@ -27,14 +30,12 @@ export default function App() {
     <ErrorBoundary>
       <BrowserRouter>
         <Routes>
-          <Route path="/infinite-canvas" element={<InfiniteCanvas />} />
           <Route path="*" element={
             <Layout>
               <Routes>
                 <Route path="/" element={<StudioTryOn />} />
                 <Route path="/styles" element={<StyleManage />} />
                 <Route path="/batch" element={<BatchGenerate />} />
-                <Route path="/canvas" element={<DetailCanvas />} />
                 <Route path="/general" element={<GeneralStudio />} />
                 <Route path="/history" element={<TaskHistoryPage />} />
                 <Route path="/prompts" element={<PromptTemplatesPage />} />
@@ -43,6 +44,11 @@ export default function App() {
                 <Route path="/pose" element={<PoseGenerate />} />
                 <Route path="/detail-gen" element={<DetailGenerate />} />
                 <Route path="/settings" element={<SettingsPage />} />
+                <Route path="/whitebg" element={<WhiteBgTool />} />
+                <Route path="/pipeline" element={<PipelineMonitor />} />
+                <Route path="/view-angle" element={<ViewAngleTool />} />
+                <Route path="/workflow" element={<WorkflowRunner />} />
+                <Route path="/infinite-canvas" element={<InfiniteCanvas />} />
               </Routes>
             </Layout>
           } />

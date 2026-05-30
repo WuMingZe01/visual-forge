@@ -10,6 +10,7 @@ export default defineConfig({
     },
   },
   server: {
+    host: '0.0.0.0',
     port: 5174,
     proxy: {
       // ---- 外部 API 代理 ----
@@ -33,6 +34,14 @@ export default defineConfig({
         target: 'https://api.moonshot.cn',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/llm-moonshot/, ''),
+        secure: false,
+        timeout: 180000,
+        proxyTimeout: 180000,
+      },
+      '/llm-mimo': {
+        target: 'https://api.xiaomimimo.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/llm-mimo/, ''),
         secure: false,
         timeout: 180000,
         proxyTimeout: 180000,

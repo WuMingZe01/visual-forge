@@ -14,12 +14,12 @@ interface UploadBlockProps {
   onUp: (img: ReferenceImage) => void;
   onRm: () => void;
   maxSize: number;
+  onError?: (msg: string) => void;
 }
 
-export function UploadBlock({ label, icon: Icon, img, onUp, onRm, maxSize }: UploadBlockProps) {
+export function UploadBlock({ label, icon: Icon, img, onUp, onRm, maxSize, onError }: UploadBlockProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // 组件卸载或图片替换时释放 blob URL
   useEffect(() => {
     return () => {
       if (img?.previewUrl?.startsWith('blob:')) {
@@ -29,8 +29,14 @@ export function UploadBlock({ label, icon: Icon, img, onUp, onRm, maxSize }: Upl
   }, [img?.id]);
 
   const handleFile = (file: File) => {
-    if (!file.type.startsWith('image/')) return;
-    if (file.size > maxSize) return;
+    if (!file.type.startsWith('image/')) {
+      onError?.('请选择图片文件（JPG/PNG/WebP）');
+      return;
+    }
+    if (file.size > maxSize) {
+      onError?.(`文件过大，最大 ${Math.round(maxSize / 1024 / 1024)}MB`);
+      return;
+    }
     onUp({
       id: genId(),
       type: 'product_front',

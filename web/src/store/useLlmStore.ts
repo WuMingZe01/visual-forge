@@ -10,6 +10,8 @@ export interface LlmConfig {
   model: string;
   type: 'text' | 'vision';
   enabled: boolean;
+  /** 模型上下文长度 (max_tokens)，默认 1M (1048576) */
+  maxTokens: number;
 }
 
 const DEFAULT_CONFIGS: LlmConfig[] = [
@@ -18,12 +20,21 @@ const DEFAULT_CONFIGS: LlmConfig[] = [
     apiKey: import.meta.env.VITE_LLM_DEEPSEEK_KEY || '',
     baseUrl: 'https://api.deepseek.com/v1',
     model: 'deepseek-chat', type: 'text', enabled: true,
+    maxTokens: 1048576,
+  },
+  {
+    id: 'mimo-vision', name: 'MiMo V2.5 多模态', provider: 'mimo',
+    apiKey: import.meta.env.VITE_LLM_MIMO_KEY || 'sk-ceqaykkja91qsnxxane5qomonzfmyog3lquha9xwgfptgyk7',
+    baseUrl: 'https://api.xiaomimimo.com/v1',
+    model: 'mimo-v2.5', type: 'vision', enabled: true,
+    maxTokens: 1048576,
   },
   {
     id: 'kimi-vision', name: 'Kimi K2.6 多模态', provider: 'moonshot',
     apiKey: import.meta.env.VITE_LLM_KIMI_KEY || '',
     baseUrl: 'https://api.moonshot.cn/v1',
-    model: 'kimi-k2.6', type: 'vision', enabled: true,
+    model: 'kimi-k2.6', type: 'vision', enabled: false,
+    maxTokens: 1048576,
   },
 ];
 
@@ -34,10 +45,16 @@ function loadDefaultsWithSaved(): LlmConfig[] {
     const saved = localStorage.getItem(LS_KEY);
     if (!saved) return [...DEFAULT_CONFIGS];
     const parsed = JSON.parse(saved) as LlmConfig[];
+    const defaultIds = new Set(DEFAULT_CONFIGS.map(d => d.id));
     const merged = DEFAULT_CONFIGS.map(d => {
       const existing = parsed.find((p: LlmConfig) => p.id === d.id);
-      return existing || d;
+      return existing ? { ...d, apiKey: d.apiKey || existing.apiKey, maxTokens: existing.maxTokens || d.maxTokens } : d;
     });
+    for (const p of parsed) {
+      if (!defaultIds.has(p.id)) {
+        merged.push({ ...p, maxTokens: p.maxTokens || 1048576 });
+      }
+    }
     return merged;
   } catch { return [...DEFAULT_CONFIGS]; }
 }

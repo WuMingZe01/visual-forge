@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   Layers, Play, Upload, X, Loader2, FolderOpen, Info, Trash2, Settings,
   Camera, CheckCircle2, AlertTriangle, User, Download, StopCircle, RefreshCw,
-  Minus, Plus, FolderDown, PlusCircle, History, ZoomIn
+  Minus, Plus, FolderDown, PlusCircle, History, ZoomIn, BookTemplate, Search, ImageIcon, Link2
 } from 'lucide-react';
 import { useTaskHistoryStore } from '@/store/useTaskHistoryStore';
 import { useLlmStore } from '@/store/useLlmStore';
@@ -13,13 +13,16 @@ import { useTemplateStore } from '@/store/useTemplateStore';
 import type { ReferenceImage, SKUInfo } from '@/types/tryon-types';
 import { AI_MODELS_FOR_TRYON, RESOLUTION_PRESETS } from '@/types/tryon-types';
 import { generateTryOnImage, getStoredModelConfig, isModelEnabled, getProvider } from '@/services/tryonApi';
-import { availableKeyCount, totalAvailableKeys, syncKeyPools } from '@/services/keyPool';
+import { availableKeyCount, totalAvailableKeys, getPoolCapacity, getTotalCapacity, allocateTasks } from '@/services/keyPool';
 import { queryStyleByCode } from '@/services/lingmao';
-import { analyzeModelImage, analyzeProductImage, analyzeProductWithLogo, assembleFinalPrompt } from '@/services/llmService';
+import { analyzeSingleRefImage } from '@/services/llmService';
 import { buildProductInfoString } from '@/hooks/useAIPrompt';
-import { compressImageForLLM, compressImageForRef, blobUrlToFile, withTimeout } from '@/utils/image';
+import { compressImageForRef, blobUrlToFile, withTimeout } from '@/utils/image';
 import { saveImage, loadImage, deleteImage, clearAll as clearImageStore } from '@/services/imageStore';
+import { getLocalLibrary } from '@/hooks/useLocalLibrary';
 import { ImageCompareModal, type CompareImage } from '@/components/ImageCompareModal';
+import { runBatchWithPipeline, MAIN_BATCH_WORKFLOW, POSE_BATCH_WORKFLOW, DETAIL_BATCH_WORKFLOW, QUICK_GENERATE_WORKFLOW, PIPELINE_FULL_WORKFLOW, SIMPLE_BATCH_WORKFLOW } from '@/services/pipeline';
+import type { WorkflowConfig } from '@/services/pipeline';
 
 function genId() { return `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`; }
 
@@ -56,6 +59,9 @@ interface BatchRow {
   frontImage: ReferenceImage | null;
   backImage: ReferenceImage | null;
   modelImage: ReferenceImage | null;
+  styleImage: ReferenceImage | null;
+  /** 从款式管理 IndexedDB 加载的细节图 base64 数组 */
+  detailImages: string[];
   prompt: string;
   lingmaoData: SKUInfo | null;
   status: 'idle' | 'generating' | 'done' | 'failed';
@@ -65,26 +71,40 @@ interface BatchRow {
   count: number;
 }
 
-type BatchMode = 'shared' | 'individual';
+type WorkflowStage = 'main' | 'pose' | 'detail' | 'pipeline';
+
+// 管道工作流列表
+const PIPELINE_WORKFLOWS: { id: string; name: string; desc: string; config: WorkflowConfig }[] = [
+  { id: 'main_batch', name: '主图批量（全流程）', desc: '准备→LLM反推→并发生图→Mimo校验→完成', config: MAIN_BATCH_WORKFLOW },
+  { id: 'pose_batch', name: '姿势裂变（跳过反推）', desc: '准备→并发生图→完成', config: POSE_BATCH_WORKFLOW },
+  { id: 'detail_batch', name: '详情批量（跳过反推）', desc: '准备→并发生图→完成', config: DETAIL_BATCH_WORKFLOW },
+  { id: 'quick_gen', name: '快速生图（单张）', desc: '准备→并发生图→完成', config: QUICK_GENERATE_WORKFLOW },
+  { id: 'simple_batch', name: '简易批量（无校验）', desc: '准备→并发生图→完成', config: SIMPLE_BATCH_WORKFLOW },
+  { id: 'pipeline_full', name: '贯穿管道（主图→姿势→详情）', desc: '准备→LLM反推→并发生图→Mimo校验→完成', config: PIPELINE_FULL_WORKFLOW },
+];
 
 // ===== 行组件 (memoized) =====
 const BatchTableRow = memo(function BatchTableRow({
-  row, mode, allModels, isRunning, onUpdate, onRemove, onModelUpload, onDownloadSingle, onRetry, onCompare,
+  row, isRunning, onUpdate, onRemove, onDownloadSingle, onRetry, onCompare, onModelUpload, onStyleUpload,
 }: {
   row: BatchRow;
-  mode: BatchMode;
-  allModels: { id: string; name: string }[];
   isRunning: boolean;
   onUpdate: (id: string, u: Partial<BatchRow>) => void;
   onRemove: (id: string) => void;
   onModelUpload: (id: string, f: File) => Promise<void> | void;
+  onStyleUpload: (id: string, f: File) => Promise<void> | void;
   onDownloadSingle: (row: BatchRow) => void;
   onRetry: (id: string) => void;
   onCompare: (row: BatchRow, index: number) => void;
 }) {
   const hasSku = !!row.skuCode.trim();
   const previewUrls = useMemo(
-    () => row.resultUrls.slice(0, 4).map((u) => u + (u.includes('?') ? '&' : '?') + 'thumb=1'),
+    () => row.resultUrls.slice(0, 4).map((u) => {
+      const sep = u.includes('?') ? '&' : '?';
+      // 阿里云 OSS 用原生缩放，其他用 thumb=1（部分 CDN 支持）
+      if (u.includes('aliyuncs.com')) return u + sep + 'x-oss-process=image/resize,w_80';
+      return u + sep + 'thumb=1';
+    }),
     [row.resultUrls]
   );
 
@@ -110,47 +130,39 @@ const BatchTableRow = memo(function BatchTableRow({
         )}
       </td>
 
-      {/* Model Image (individual mode only) */}
-      {mode === 'individual' && (
-        <td className="py-2 px-1">
-          {row.modelImage?.previewUrl ? (
-            <div className="relative inline-flex">
-              <img src={row.modelImage.previewUrl} alt="" loading="lazy" className="w-8 h-11 object-cover rounded border border-forge-border/30" />
-              <button onClick={() => onUpdate(row.id, { modelImage: null })} className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-forge-red/80 text-white flex items-center justify-center"><X size={6} /></button>
-            </div>
-          ) : row.modelImage ? (
-            <button onClick={() => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.onchange = () => { const f = inp.files?.[0]; if (f) onModelUpload(row.id, f); }; inp.click(); }}
-              className="p-1 rounded border border-dashed border-forge-border/40 text-forge-text2/30 hover:text-forge-cyan hover:border-forge-cyan/30 text-[10px] flex items-center gap-0.5"><Upload size={8} />重传</button>
-          ) : (
-            <button onClick={() => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.onchange = () => { const f = inp.files?.[0]; if (f) onModelUpload(row.id, f); }; inp.click(); }}
-              className="p-1 rounded border border-dashed border-forge-border/40 text-forge-text2/30 hover:text-forge-cyan hover:border-forge-cyan/30 text-[10px] flex items-center gap-0.5"><Upload size={8} />上传</button>
-          )}
-        </td>
-      )}
-
       {/* Front Image */}
       <td className="py-2 px-1">
         {row.frontImage?.previewUrl ? (
-          <div className="relative inline-flex"><img src={row.frontImage.previewUrl} alt="" loading="lazy" className="w-8 h-11 object-cover rounded border border-forge-border/30" /><span className="absolute bottom-0 left-0 bg-forge-cyan/70 text-forge-bg text-[6px] px-0.5 rounded-tr">正</span></div>
-        ) : row.frontImage ? (
-          <button onClick={() => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.onchange = () => { const f = inp.files?.[0]; if (f) { onUpdate(row.id, { frontImage: { id: genId(), type: 'product_front', previewUrl: URL.createObjectURL(f), name: f.name, size: f.size } }); } }; inp.click(); }}
-            className="p-1 rounded border border-dashed border-forge-border/40 text-forge-text2/30 hover:text-forge-cyan text-[10px] flex items-center gap-0.5"><Upload size={8} />重传</button>
+          <div className="relative inline-flex"><img src={row.frontImage.previewUrl} alt="" loading="lazy" decoding="async" className="w-8 h-11 object-cover rounded border border-forge-border/30" /><span className="absolute bottom-0 left-0 bg-forge-cyan/70 text-forge-bg text-[6px] px-0.5 rounded-tr">正</span></div>
         ) : (
           <button onClick={() => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.onchange = () => { const f = inp.files?.[0]; if (f) { onUpdate(row.id, { frontImage: { id: genId(), type: 'product_front', previewUrl: URL.createObjectURL(f), name: f.name, size: f.size } }); } }; inp.click(); }}
-            className="p-1 rounded border border-dashed border-forge-border/40 text-forge-text2/30 hover:text-forge-cyan text-[10px] flex items-center gap-0.5"><Upload size={8} />上传</button>
+            className="p-1 rounded border border-dashed border-forge-border/40 text-forge-text2/30 hover:text-forge-cyan hover:border-forge-cyan/30 text-[10px] flex items-center gap-0.5"><Upload size={8} />上传</button>
         )}
       </td>
 
-      {/* Back Image */}
+      {/* Model Image */}
       <td className="py-2 px-1">
-        {row.backImage?.previewUrl ? (
-          <div className="relative inline-flex"><img src={row.backImage.previewUrl} alt="" loading="lazy" className="w-8 h-11 object-cover rounded border border-forge-border/30" /><span className="absolute bottom-0 left-0 bg-forge-orange/70 text-forge-bg text-[6px] px-0.5 rounded-tr">反</span></div>
-        ) : row.backImage ? (
-          <button onClick={() => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.onchange = () => { const f = inp.files?.[0]; if (f) { onUpdate(row.id, { backImage: { id: genId(), type: 'product_back', previewUrl: URL.createObjectURL(f), name: f.name, size: f.size } }); } }; inp.click(); }}
-            className="p-1 rounded border border-dashed border-forge-border/40 text-forge-text2/30 hover:text-forge-cyan text-[10px] flex items-center gap-0.5"><Upload size={8} />重传</button>
+        {row.modelImage?.previewUrl ? (
+          <div className="relative inline-flex">
+            <img src={row.modelImage.previewUrl} alt="" loading="lazy" decoding="async" className="w-8 h-11 object-cover rounded border border-forge-border/30" />
+            <button onClick={() => onUpdate(row.id, { modelImage: null })} className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-forge-red/80 text-white flex items-center justify-center"><X size={6} /></button>
+          </div>
         ) : (
-          <button onClick={() => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.onchange = () => { const f = inp.files?.[0]; if (f) { onUpdate(row.id, { backImage: { id: genId(), type: 'product_back', previewUrl: URL.createObjectURL(f), name: f.name, size: f.size } }); } }; inp.click(); }}
-            className="p-1 rounded border border-dashed border-forge-border/40 text-forge-text2/30 hover:text-forge-cyan text-[10px] flex items-center gap-0.5"><Upload size={8} />上传</button>
+          <button onClick={() => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.onchange = () => { const f = inp.files?.[0]; if (f) onModelUpload(row.id, f); }; inp.click(); }}
+            className="p-1 rounded border border-dashed border-forge-border/40 text-forge-text2/30 hover:text-forge-cyan hover:border-forge-cyan/30 text-[10px] flex items-center gap-0.5"><Upload size={8} />模特</button>
+        )}
+      </td>
+
+      {/* Style Reference Image */}
+      <td className="py-2 px-1">
+        {row.styleImage?.previewUrl ? (
+          <div className="relative inline-flex">
+            <img src={row.styleImage.previewUrl} alt="" loading="lazy" decoding="async" className="w-8 h-11 object-cover rounded border border-forge-border/30" />
+            <button onClick={() => onUpdate(row.id, { styleImage: null })} className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-forge-red/80 text-white flex items-center justify-center"><X size={6} /></button>
+          </div>
+        ) : (
+          <button onClick={() => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.onchange = () => { const f = inp.files?.[0]; if (f) onStyleUpload(row.id, f); }; inp.click(); }}
+            className="p-1 rounded border border-dashed border-forge-border/40 text-forge-text2/30 hover:text-forge-cyan hover:border-forge-cyan/30 text-[10px] flex items-center gap-0.5"><Upload size={8} />风格</button>
         )}
       </td>
 
@@ -210,7 +222,7 @@ const BatchTableRow = memo(function BatchTableRow({
           <div className="flex items-center justify-center gap-1">
             <div className="flex -space-x-1 cursor-pointer" onClick={() => onCompare(row, 0)} title="点击放大对比">
               {previewUrls.slice(0, 3).map((url, i) => (
-                <img key={i} src={url} alt="" loading="lazy" className="w-5 h-7 object-cover rounded border border-forge-green/20 hover:border-forge-cyan/50 hover:scale-110 transition-transform" />
+                <img key={i} src={url} alt="" loading="lazy" decoding="async" className="w-5 h-7 object-cover rounded border border-forge-green/20 hover:border-forge-cyan/50 hover:scale-110 transition-transform" />
               ))}
               {row.resultUrls.length > 3 && <span className="text-[10px] text-forge-text2">+{row.resultUrls.length - 3}</span>}
             </div>
@@ -241,36 +253,133 @@ const BatchTableRow = memo(function BatchTableRow({
 export function BatchGenerate() {
   const navigate = useNavigate();
   const addTask = useTaskHistoryStore((s) => s.addTask);
+  const updateTask = useTaskHistoryStore((s) => s.updateTask);
   const taskHistoryCount = useTaskHistoryStore((s) => s.tasks.length);
   const getVisionModel = useLlmStore((s) => s.getVisionModel);
   const getTextModel = useLlmStore((s) => s.getTextModel);
   const addToast = useAppStore((s) => s.addToast);
 
-  const [mode, setMode] = useState<BatchMode>('shared');
-  const [sharedModelImage, setSharedModelImage] = useState<ReferenceImage | null>(null);
+  const [workflowStage, setWorkflowStage] = useState<WorkflowStage>('main');
+  const [selectedPipelineWorkflow, setSelectedPipelineWorkflow] = useState<string>('main_batch');
   const [rows, setRows] = useState<BatchRow[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [globalCount, setGlobalCount] = useState(1);
   const HYBRID_MODEL_ID = '__hybrid__';
-  const [globalModel, setGlobalModel] = useState('gpt-image-2-vip'); // 默认 Grsai，效果最好
+  const [globalModel, setGlobalModel] = useState('gpt-image-2'); // 默认 Grsai gpt-image-2, 1024x1024
   const [globalResolution, setGlobalResolution] = useState('3264×2448 (4:3, 4K)');
   const [autoDownload, setAutoDownload] = useState(false);
   const [saveFolderHandle, setSaveFolderHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [aiStatus, setAiStatus] = useState({ step: 0, message: '' });
+  const [batchAnalyzing, setBatchAnalyzing] = useState(false);
 
-  // ===== 新增：模特库/模板库/Logo选择 =====
+  // beforeunload protection during generation
+  useEffect(() => {
+    if (!isRunning) return;
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [isRunning]);
+
+  // =====新增：模特库/模板库/Logo选择 =====
   const models = useModelStore((s) => s.models);
   const templates = useTemplateStore((s) => s.templates);
   const [selectedModelId, setSelectedModelId] = useState('');
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [logoImage, setLogoImage] = useState<ReferenceImage | null>(null);
+  const [skuCodeInput, setSkuCodeInput] = useState('');
+  // Pipeline-specific template selections
+  const [pipelinePoseTemplateId, setPipelinePoseTemplateId] = useState('');
+  const [pipelineDetailTemplateId, setPipelineDetailTemplateId] = useState('');
   const selectedTemplate = templates.find((t) => t.id === selectedTemplateId);
   const selectedModel = models.find((m) => m.id === selectedModelId);
+
+  // Auto-fill style reference from template (load full-res from IndexedDB) — per-row apply
+  const applyTemplateToAllRows = useCallback(async () => {
+    const tpl = selectedTemplate;
+    if (!tpl || tpl.refImages.length === 0) { addToast('warning', '请先选择模板'); return; }
+    const ref = tpl.refImages[0];
+    const full = await loadImage(`tpl_ref_${ref.id}`);
+    const img: ReferenceImage = { id: ref.id, type: 'detail_ref', previewUrl: full || ref.dataUrl, name: ref.name, size: ref.size };
+    setRows(prev => prev.map(r => r.styleImage ? r : { ...r, styleImage: img }));
+    addToast('success', `已应用模板风格到 ${rows.filter(r => !r.styleImage).length} 行`);
+  }, [selectedTemplate, rows]);
+
+  const applyModelToAllRows = useCallback(() => {
+    if (!selectedModel?.previewUrl) { addToast('warning', '请先选择模特'); return; }
+    const img: ReferenceImage = { id: selectedModel.id, type: 'model', previewUrl: selectedModel.previewUrl, name: selectedModel.originalName, size: selectedModel.size };
+    setRows(prev => prev.map(r => r.modelImage ? r : { ...r, modelImage: img }));
+    addToast('success', `已应用模特到所有行`);
+  }, [selectedModel]);
+
+  // 模板槽位预览（pose/detail 模式：选模板后展示每张参考图 + 可编辑提示词）
+  interface TemplateSlot { refIndex: number; refUrl: string; prompt: string; }
+  const [templateSlots, setTemplateSlots] = useState<TemplateSlot[]>([]);
+
+  // 选模板后同步槽位（加载 IndexedDB 原图，非 300px 缩略图）
+  useEffect(() => {
+    const tpl = selectedTemplate;
+    const showSlots = (workflowStage === 'pose' || workflowStage === 'detail') && tpl && tpl.refImages.length > 0;
+    if (!showSlots) { setTemplateSlots([]); return; }
+    let cancelled = false;
+    (async () => {
+      const slots: TemplateSlot[] = [];
+      for (let i = 0; i < tpl.refImages.length; i++) {
+        const ref = tpl.refImages[i];
+        const full = await loadImage(`tpl_ref_${ref.id}`);
+        slots.push({ refIndex: i, refUrl: full || ref.dataUrl, prompt: ref.prompt || `姿势 #${i + 1}` });
+      }
+      if (!cancelled) setTemplateSlots(slots);
+    })();
+    return () => { cancelled = true; };
+  }, [selectedTemplateId, workflowStage]);
+
+  const updateSlotPrompt = (refIndex: number, prompt: string) => {
+    setTemplateSlots(prev => prev.map(s => s.refIndex === refIndex ? { ...s, prompt } : s));
+  };
+  const replaceSlotImage = (refIndex: number, file: File) => {
+    if (!file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      setTemplateSlots(prev => prev.map(s => s.refIndex === refIndex ? { ...s, refUrl: reader.result as string } : s));
+    };
+    reader.readAsDataURL(file);
+  };
 
   const abortRef = useRef(false);
   const initialLoadDone = useRef(false);
   // 跟踪本次运行中每行的结果（供写历史任务用）
   const rowResultsRef = useRef<Map<string, { urls: string[]; error: string }>>(new Map());
+
+  // 批量状态刷新：worker 写入 ref 缓冲区，定时器每 500ms 刷到 state，避免每张图都触发全表渲染
+  const pendingRef = useRef<Map<string, { urls: string[]; errors: string[]; runningIdx: number }>>(new Map());
+  const flushTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const applyPending = useCallback(() => {
+    const pending = pendingRef.current;
+    if (pending.size === 0) return;
+    setRows((prev) => prev.map((r) => {
+      const p = pending.get(r.id);
+      if (!p) return r;
+      const mergedUrls = [...r.resultUrls, ...p.urls];
+      const mergedError = p.errors.length > 0
+        ? (r.error ? r.error + '; ' : '') + p.errors.join('; ')
+        : r.error;
+      const mergedIdx = r.runningIdx + p.runningIdx;
+      const newStatus: BatchRow['status'] = mergedUrls.length >= r.count ? 'done' : 'generating';
+      return { ...r, resultUrls: mergedUrls, error: mergedError, runningIdx: mergedIdx, status: newStatus };
+    }));
+    pendingRef.current = new Map();
+  }, []);
+
+  const startFlushTimer = useCallback(() => {
+    if (flushTimerRef.current) return;
+    flushTimerRef.current = setInterval(applyPending, 500);
+  }, [applyPending]);
+
+  const stopFlushTimer = useCallback(() => {
+    if (flushTimerRef.current) { clearInterval(flushTimerRef.current); flushTimerRef.current = null; }
+    applyPending(); // 最后一次立即 flush
+  }, [applyPending]);
 
   // Image compare modal
   const [compareOpen, setCompareOpen] = useState(false);
@@ -292,8 +401,8 @@ export function BatchGenerate() {
   const LS_BATCH = 'vf-batch-state';
   const thumbRef = useRef<Map<string, string>>(new Map()); // rowId_type → base64 thumbnail
   interface StoredBatchImage { name: string; size: number; thumbnail: string; }
-  interface StoredBatchRow { id: string; skuCode: string; productName: string; frontImage: StoredBatchImage | null; backImage: StoredBatchImage | null; modelImage: StoredBatchImage | null; prompt: string; lingmaoData: SKUInfo | null; status: BatchRow['status']; resultUrls: string[]; error: string; count: number; }
-  interface StoredBatch { mode: BatchMode; globalCount: number; globalModel: string; globalResolution: string; rows: StoredBatchRow[]; sharedModelThumb?: string; }
+  interface StoredBatchRow { id: string; skuCode: string; productName: string; frontImage: StoredBatchImage | null; backImage: StoredBatchImage | null; modelImage: StoredBatchImage | null; styleImage: StoredBatchImage | null; prompt: string; lingmaoData: SKUInfo | null; status: BatchRow['status']; resultUrls: string[]; error: string; count: number; }
+  interface StoredBatch { globalCount: number; globalModel: string; globalResolution: string; rows: StoredBatchRow[]; }
 
   // 生成缩略图（max 300px, JPEG 60%）
   async function makeThumb(file: File): Promise<string> {
@@ -326,27 +435,23 @@ export function BatchGenerate() {
 
   // Save on every meaningful change
   useEffect(() => {
-    // 首次挂载不删 localStorage（load useEffect 还未执行）
     if (!initialLoadDone.current) return;
-    if (rows.length === 0 && !sharedModelImage) {
-      localStorage.removeItem(LS_BATCH);
-      return;
-    }
+    if (rows.length === 0) { localStorage.removeItem(LS_BATCH); return; }
     const stored: StoredBatch = {
-      mode, globalCount, globalModel, globalResolution,
+      globalCount, globalModel, globalResolution,
       rows: rows.map((r) => ({
         id: r.id, skuCode: r.skuCode, productName: r.productName,
         frontImage: r.frontImage ? { name: r.frontImage.name, size: r.frontImage.size, thumbnail: thumbRef.current.get(`${r.id}_front`) || '' } : null,
         backImage: r.backImage ? { name: r.backImage.name, size: r.backImage.size, thumbnail: thumbRef.current.get(`${r.id}_back`) || '' } : null,
         modelImage: r.modelImage ? { name: r.modelImage.name, size: r.modelImage.size, thumbnail: thumbRef.current.get(`${r.id}_model`) || '' } : null,
+        styleImage: r.styleImage ? { name: r.styleImage.name, size: r.styleImage.size, thumbnail: thumbRef.current.get(`${r.id}_style`) || '' } : null,
         prompt: r.prompt, lingmaoData: r.lingmaoData,
         status: r.status, resultUrls: r.resultUrls, error: r.error,
         count: r.count,
       })),
-      sharedModelThumb: thumbRef.current.get('__shared_model__') || '',
     };
     try { localStorage.setItem(LS_BATCH, JSON.stringify(stored)); } catch {}
-  }, [rows, mode, globalCount, globalModel, globalResolution, sharedModelImage]);
+  }, [rows, globalCount, globalModel, globalResolution]);
 
   // Load on mount（必须在 useEffect 中，render 阶段 setState 会导致白屏）
   useEffect(() => {
@@ -354,28 +459,26 @@ export function BatchGenerate() {
       const raw = localStorage.getItem(LS_BATCH);
       if (!raw) return;
       const saved = JSON.parse(raw) as StoredBatch;
-      if (saved.mode) setMode(saved.mode);
       if (saved.globalCount) setGlobalCount(saved.globalCount);
       if (saved.globalModel) setGlobalModel(saved.globalModel);
       if (saved.globalResolution) setGlobalResolution(saved.globalResolution);
-      if (saved.sharedModelThumb && saved.sharedModelThumb.startsWith('data:')) {
-        thumbRef.current.set('__shared_model__', saved.sharedModelThumb);
-        setSharedModelImage({ id: genId(), type: 'model', previewUrl: saved.sharedModelThumb, name: 'model_ref.jpg', size: 0 });
-      }
       if (saved.rows?.length > 0) {
         setRows(saved.rows.map((sr): BatchRow => {
           const frontThumb = sr.frontImage?.thumbnail || '';
           const backThumb = sr.backImage?.thumbnail || '';
           const modelThumb = sr.modelImage?.thumbnail || '';
+          const styleThumb = sr.styleImage?.thumbnail || '';
           if (frontThumb) thumbRef.current.set(`${sr.id}_front`, frontThumb);
           if (backThumb) thumbRef.current.set(`${sr.id}_back`, backThumb);
           if (modelThumb) thumbRef.current.set(`${sr.id}_model`, modelThumb);
+          if (styleThumb) thumbRef.current.set(`${sr.id}_style`, styleThumb);
           return {
             id: sr.id, skuCode: sr.skuCode, productName: sr.productName,
             frontImage: sr.frontImage ? { id: genId(), type: 'product_front', previewUrl: frontThumb || '', name: sr.frontImage.name, size: sr.frontImage.size } : null,
             backImage: sr.backImage ? { id: genId(), type: 'product_back', previewUrl: backThumb || '', name: sr.backImage.name, size: sr.backImage.size } : null,
             modelImage: sr.modelImage ? { id: genId(), type: 'model', previewUrl: modelThumb || '', name: sr.modelImage.name, size: sr.modelImage.size } : null,
-            prompt: sr.prompt, lingmaoData: sr.lingmaoData,
+            styleImage: sr.styleImage ? { id: genId(), type: 'detail_ref', previewUrl: styleThumb || '', name: sr.styleImage.name, size: sr.styleImage.size } : null,
+            detailImages: [], prompt: sr.prompt, lingmaoData: sr.lingmaoData,
             status: sr.status === 'generating' ? 'idle' : sr.status as BatchRow['status'], resultUrls: sr.resultUrls, error: sr.error,
             runningIdx: 0, count: sr.count ?? globalCount,
           };
@@ -407,6 +510,15 @@ export function BatchGenerate() {
     if (thumb) thumbRef.current.set(`${rowId}_model`, thumb);
     persistRefImage(`${rowId}_model`, file); // IndexedDB: 1024px 参考图
     updateRow(rowId, { modelImage: { id: genId(), type: 'model', previewUrl: URL.createObjectURL(file), name: file.name, size: file.size } });
+  }, [updateRow]);
+
+  const handleStyleUpload = useCallback(async (rowId: string, file: File) => {
+    if (!file.type.startsWith('image/')) return;
+    if (file.size > 50 * 1024 * 1024) { addToast('warning', '单文件最大 50MB'); return; }
+    const thumb = await makeThumb(file);
+    if (thumb) thumbRef.current.set(`${rowId}_style`, thumb);
+    persistRefImage(`${rowId}_style`, file);
+    updateRow(rowId, { styleImage: { id: genId(), type: 'detail_ref', previewUrl: URL.createObjectURL(file), name: file.name, size: file.size } });
   }, [updateRow]);
 
   const handleDownloadSingle = useCallback(async (row: BatchRow) => {
@@ -469,7 +581,7 @@ export function BatchGenerate() {
         id: genId(), skuCode, productName: '',
         frontImage: imgs.front ? { id: genId(), type: 'product_front', previewUrl: URL.createObjectURL(imgs.front), name: imgs.front.name, size: imgs.front.size } : null,
         backImage: imgs.back ? { id: genId(), type: 'product_back', previewUrl: URL.createObjectURL(imgs.back), name: imgs.back.name, size: imgs.back.size } : null,
-        modelImage: null, prompt: '', lingmaoData: null,
+        modelImage: null, styleImage: null, detailImages: [], prompt: '', lingmaoData: null,
         status: 'idle' as const, resultUrls: [], error: '', runningIdx: 0,
         count: globalCount,
       });
@@ -509,8 +621,40 @@ export function BatchGenerate() {
   };
 
   const autoFetchLingmao = async (codes: string[]) => {
+    const localLib = getLocalLibrary();
     for (const code of codes) {
       if (!code) continue;
+      // First try local library
+      const localEntry = localLib.find(s => s.skuCode === code);
+      if (localEntry) {
+        setRows((prev) => prev.map((row) => {
+          if (row.skuCode !== code) return row;
+          const updates: Partial<BatchRow> = { lingmaoData: localEntry, productName: localEntry.productName || code };
+          return { ...row, ...updates };
+        }));
+        // 从 IndexedDB 异步加载白底图（localStorage 只存标记，图片在 IndexedDB）
+        const flags = localEntry as unknown as Record<string, unknown>;
+        const sku = code;
+        (async () => {
+          const [frontB64, backB64] = await Promise.all([
+            flags._hasFront ? loadImage(`style_${sku}_front`) : Promise.resolve(undefined),
+            flags._hasBack ? loadImage(`style_${sku}_back`) : Promise.resolve(undefined),
+          ]);
+          setRows((prev) => prev.map((row) => {
+            if (row.skuCode !== sku) return row;
+            const u: Partial<BatchRow> = {};
+            if (frontB64 && !row.frontImage) {
+              u.frontImage = { id: genId(), type: 'product_front', previewUrl: frontB64, name: `${sku}_正面`, size: 0 };
+            }
+            if (backB64 && !row.backImage) {
+              u.backImage = { id: genId(), type: 'product_back', previewUrl: backB64, name: `${sku}_反面`, size: 0 };
+            }
+            return Object.keys(u).length > 0 ? { ...row, ...u } : row;
+          }));
+        })();
+        continue;
+      }
+      // Fallback to Lingmao
       try {
         const result = await queryStyleByCode([code]);
         if (result.skuInfo) {
@@ -522,11 +666,34 @@ export function BatchGenerate() {
     }
   };
 
+  // Batch import from SKU codes (text input)
+  const handleSkuCodeImport = async () => {
+    const codes = skuCodeInput.split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
+    if (codes.length === 0) { addToast('warning', '请输入款号'); return; }
+
+    const existingCodes = new Set(rows.map(r => r.skuCode));
+    const newCodes = codes.filter(c => !existingCodes.has(c));
+    if (newCodes.length === 0) { addToast('info', '所有款号已在列表中'); return; }
+
+    const newRows: BatchRow[] = newCodes.map(code => ({
+      id: genId(), skuCode: code, productName: '', frontImage: null, backImage: null,
+      modelImage: null, styleImage: null, detailImages: [], prompt: '', lingmaoData: null,
+      status: 'idle' as const, resultUrls: [], error: '', runningIdx: 0, count: globalCount,
+    }));
+
+    setRows(prev => [...prev, ...newRows]);
+    setSkuCodeInput('');
+    addToast('info', `已添加 ${newRows.length} 个款号，正在关联资料...`);
+    await autoFetchLingmao(newCodes);
+    const matched = rows.filter(r => r.lingmaoData || r.frontImage).length;
+    addToast('success', `关联完成: ${matched}/${rows.length + newRows.length} 行有资料`);
+  };
+
   // ===== Add Manual Row =====
   const addManualRow = () => {
     setRows((prev) => [...prev, {
       id: genId(), skuCode: '', productName: '', frontImage: null, backImage: null,
-      modelImage: null, prompt: 'Professional fashion e-commerce photography, model wearing the garment, soft studio lighting, clean background, 8K quality',
+      modelImage: null, styleImage: null, detailImages: [], prompt: 'Professional fashion e-commerce photography, model wearing the garment, soft studio lighting, clean background, 8K quality',
       lingmaoData: null, status: 'idle' as const, resultUrls: [], error: '', runningIdx: 0,
       count: globalCount,
     }]);
@@ -572,377 +739,413 @@ export function BatchGenerate() {
     }
   };
 
-  // ===== Main Run =====
+  // ===== Pipeline: pose/detail stage with specific template =====
+  const runPipelinePoseDetail = async (stage: 'pose' | 'detail', template: typeof selectedTemplate, targetRows: BatchRow[]) => {
+    if (!template || template.refImages.length === 0) { addToast('warning', `未选择${stage === 'pose' ? '姿势' : '详情'}模板`); return; }
+
+    const isHybrid = globalModel === HYBRID_MODEL_ID;
+    const concurrency = Math.min(
+      isHybrid ? getTotalCapacity() : getPoolCapacity(getProvider(globalModel)),
+      36
+    );
+    const preset = RESOLUTION_PRESETS.find((p) => p.label === globalResolution);
+
+    // 预计算混合引擎任务分配
+    let hybridAssignments: ReturnType<typeof allocateTasks> = [];
+    let hybridAssignCursor = 0;
+    if (isHybrid) {
+      const totalHybridTasks = targetRows.length * (template.refImages.length || 1);
+      hybridAssignments = allocateTasks(totalHybridTasks);
+    }
+
+    // 预加载模板参考图原图（从 IndexedDB 加载，避免 300px 缩略图）
+    const refSlots = await Promise.all(template.refImages.map(async (ref, i) => {
+      const full = await loadImage(`tpl_ref_${ref.id}`);
+      return { refUrl: full || ref.dataUrl, prompt: ref.prompt || `${stage === 'pose' ? '姿势' : '详情'} #${i + 1}` };
+    }));
+    let idx = 0;
+    const totalTasks = targetRows.length * refSlots.length;
+
+    const worker = async () => {
+      while (true) {
+        if (abortRef.current) return;
+        const i = idx++;
+        if (i >= totalTasks) return;
+        const rowIdx = Math.floor(i / refSlots.length);
+        const slotIdx = i % refSlots.length;
+        const row = targetRows[rowIdx];
+        if (!row) return;
+
+        const slot = refSlots[slotIdx];
+
+        try {
+          // 加载每行模特图
+          let modelB64: string | undefined;
+          const cached = await loadImage(`${row.id}_model`);
+          if (cached) { modelB64 = cached; }
+          else if (row.modelImage?.previewUrl) {
+            try {
+              const mf = await withTimeout(blobUrlToFile(row.modelImage.previewUrl, row.modelImage.name), 15000, `pModel ${row.skuCode}`);
+              modelB64 = await withTimeout(compressImageForRef(mf), 15000, `pModel compress ${row.skuCode}`);
+            } catch {}
+          }
+
+          let frontB64 = '';
+          if (row.frontImage?.previewUrl) {
+            const pf = await blobUrlToFile(row.frontImage.previewUrl, row.frontImage.name);
+            frontB64 = await compressImageForRef(pf);
+          } else if (row.lingmaoData?.frontImageBase64) {
+            frontB64 = row.lingmaoData.frontImageBase64;
+          }
+
+          let taskModelId = globalModel;
+          if (isHybrid && hybridAssignments.length > 0) {
+            const assignment = hybridAssignments[hybridAssignCursor++ % hybridAssignments.length];
+            taskModelId = assignment.provider === 'grsai' ? 'gpt-image-2-vip' : 'gpt-image-2-all';
+          }
+
+          const url = await generateTryOnImage({
+            prompt: `${template.promptTemplate.replace('{sku}', row.skuCode || '')}, ${slot.prompt}`,
+            modelImageBase64: modelB64,
+            productImageBase64: frontB64,
+            styleRefBase64: slot.refUrl,
+            width: preset?.width || 2448, height: preset?.height || 3264,
+            modelId: taskModelId,
+          });
+
+          // 写入缓冲区，由定时器批量刷到 state
+          const pen = pendingRef.current.get(row.id) || { urls: [], errors: [], runningIdx: 0 };
+          pen.urls.push(url);
+          pen.runningIdx++;
+          pendingRef.current.set(row.id, pen);
+        } catch (e) {
+          const pen = pendingRef.current.get(row.id) || { urls: [], errors: [], runningIdx: 0 };
+          pen.errors.push(String(e).slice(0, 80));
+          pendingRef.current.set(row.id, pen);
+        }
+      }
+    };
+
+    setAiStatus({ step: 2, message: `${concurrency}路并发` });
+    startFlushTimer();
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    stopFlushTimer();
+
+    for (const row of targetRows) {
+      addTask({
+        id: genId(), type: stage === 'pose' ? 'tryon' : 'detail',
+        skuCode: row.skuCode || '', productName: row.productName || '',
+        modelId: globalModel, provider: globalModel === HYBRID_MODEL_ID ? 'hybrid' : getProvider(globalModel),
+        prompt: `${stage} pipeline`, params: { stage, template: template.name },
+        status: 'completed', progress: 100, resultUrls: row.resultUrls, referenceUrls: [],
+        error: '', createdAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+      });
+    }
+  };
+
+  // ===== Pose/Detail batch handler =====
+  const handlePoseDetailRun = async (stage: 'pose' | 'detail') => {
+    const targetRows = rows.filter((r) => r.status !== 'done');
+    if (targetRows.length === 0) { addToast('warning', '没有待生成的行'); return; }
+    if (!selectedTemplate) { addToast('warning', `请选择${stage === 'pose' ? '姿势' : '详情'}模板`); return; }
+
+    // 槽位未加载时按需加载（避免异步竞态）
+    let slots = templateSlots.length > 0 ? [...templateSlots] : [];
+    if (slots.length === 0 && selectedTemplate.refImages.length > 0) {
+      setAiStatus({ step: 0, message: '加载模板参考图...' });
+      const loaded: typeof templateSlots = [];
+      for (let i = 0; i < selectedTemplate.refImages.length; i++) {
+        const ref = selectedTemplate.refImages[i];
+        const full = await loadImage(`tpl_ref_${ref.id}`);
+        loaded.push({ refIndex: i, refUrl: full || ref.dataUrl, prompt: ref.prompt || `${stage === 'pose' ? '姿势' : '详情'} #${i + 1}` });
+      }
+      slots = loaded;
+      setTemplateSlots(loaded); // 同步回 state，供下次使用
+    }
+    if (slots.length === 0) { addToast('warning', '模板无参考图，无法生成'); return; }
+
+    setIsRunning(true);
+    setAiStatus({ step: 1, message: `${stage === 'pose' ? '姿势裂变' : '详情'}批量生成中...` });
+    abortRef.current = false;
+    rowResultsRef.current = new Map();
+
+    const preset = RESOLUTION_PRESETS.find((p) => p.label === globalResolution);
+    const isHybrid = globalModel === HYBRID_MODEL_ID;
+    const concurrency = Math.min(
+      isHybrid ? getTotalCapacity() : getPoolCapacity(getProvider(globalModel)),
+      36
+    );
+
+    // 预计算混合引擎任务分配
+    let hybridAssignments: ReturnType<typeof allocateTasks> = [];
+    let hybridAssignCursor = 0;
+    if (isHybrid) {
+      const totalHybridTasks = targetRows.length * slots.length;
+      hybridAssignments = allocateTasks(totalHybridTasks);
+    }
+
+    try {
+      let idx = 0;
+      const totalTasks = targetRows.length * slots.length;
+
+      const worker = async () => {
+        while (true) {
+          if (abortRef.current) return;
+          const i = idx++;
+          if (i >= totalTasks) return;
+          const rowIdx = Math.floor(i / slots.length);
+          const slotIdx = i % slots.length;
+          const row = targetRows[rowIdx];
+          if (!row) return;
+
+          const slot = slots[slotIdx];
+
+          try {
+            // 加载每行模特图
+            let modelB64: string | undefined;
+            const cached = await loadImage(`${row.id}_model`);
+            if (cached) { modelB64 = cached; }
+            else if (row.modelImage?.previewUrl) {
+              try {
+                const mf = await withTimeout(blobUrlToFile(row.modelImage.previewUrl, row.modelImage.name), 15000, `model ${row.skuCode}`);
+                modelB64 = await withTimeout(compressImageForRef(mf), 15000, `model compress ${row.skuCode}`);
+              } catch {}
+            }
+
+            let productB64 = '';
+            if (row.frontImage?.previewUrl) {
+              const pf = await blobUrlToFile(row.frontImage.previewUrl, row.frontImage.name);
+              productB64 = await compressImageForRef(pf);
+            }
+
+            let taskModelId = globalModel;
+            if (isHybrid && hybridAssignments.length > 0) {
+              const assignment = hybridAssignments[hybridAssignCursor++ % hybridAssignments.length];
+              taskModelId = assignment.provider === 'grsai' ? 'gpt-image-2-vip' : 'gpt-image-2-all';
+            }
+
+            const url = await generateTryOnImage({
+              prompt: `${selectedTemplate.promptTemplate.replace('{sku}', row.skuCode || '')}, ${slot.prompt}`,
+              modelImageBase64: modelB64,
+              productImageBase64: productB64,
+              styleRefBase64: slot.refUrl,
+              width: preset?.width || 2448, height: preset?.height || 3264,
+              modelId: taskModelId,
+            });
+
+            const rowEntry = rowResultsRef.current.get(row.id) || { urls: [], error: '' };
+            rowEntry.urls.push(url);
+            rowResultsRef.current.set(row.id, rowEntry);
+
+            // 写入缓冲区，由定时器批量刷到 state
+            const pen = pendingRef.current.get(row.id) || { urls: [], errors: [], runningIdx: 0 };
+            pen.urls.push(url);
+            pen.runningIdx++;
+            pendingRef.current.set(row.id, pen);
+          } catch (e) {
+            const err = String(e).slice(0, 80);
+            const pen = pendingRef.current.get(row.id) || { urls: [], errors: [], runningIdx: 0 };
+            pen.errors.push(err);
+            pendingRef.current.set(row.id, pen);
+          }
+        }
+      };
+
+      setAiStatus({ step: 2, message: `${concurrency}路并发` });
+      startFlushTimer();
+      await Promise.all(Array.from({ length: concurrency }, () => worker()));
+      stopFlushTimer();
+
+      // Write task history
+      for (const row of targetRows) {
+        const data = rowResultsRef.current.get(row.id);
+        addTask({
+          id: genId(), type: stage === 'pose' ? 'tryon' : 'detail',
+          skuCode: row.skuCode || '', productName: row.productName || '',
+          modelId: globalModel, provider: globalModel === HYBRID_MODEL_ID ? 'hybrid' : getProvider(globalModel),
+          prompt: `${stage} batch`, params: { stage, template: selectedTemplate.name },
+          status: data?.urls.length ? 'completed' : 'failed',
+          progress: 100, resultUrls: data?.urls || [], referenceUrls: [],
+          error: data?.error || '', createdAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+        });
+      }
+
+      setAiStatus({ step: 3, message: '完成' });
+    } catch (e) {
+      addToast('error', `${stage}批量失败: ${String(e).slice(0, 100)}`);
+    } finally {
+      setIsRunning(false);
+      setRows((prev) => prev.map((r) => (r.status === 'generating' ? { ...r, status: 'idle' as const } : r)));
+    }
+  };
+
+  // ===== Main Run (Pipeline-Driven) =====
   const handleRun = async () => {
-    // 先清理上次中断遗留的 'generating' 状态行
+    // Dispatch to stage-specific handlers
+    if (workflowStage === 'pose') { await handlePoseDetailRun('pose'); return; }
+    if (workflowStage === 'detail') { await handlePoseDetailRun('detail'); return; }
+
+    // Cleanup stale 'generating' rows
     setRows((prev) => prev.map((r) => (r.status === 'generating' ? { ...r, status: 'idle' as const, runningIdx: 0 } : r)));
 
     const targetRows = rows.filter((r) => r.status !== 'done');
     if (targetRows.length === 0) { addToast('warning', '没有待生成的行，请先导入商品图片'); return; }
 
-    // 预检白底图
-    const noFrontImg = targetRows.filter((r) => !r.frontImage?.previewUrl);
-    if (noFrontImg.length > 0) {
-      const codes = noFrontImg.map(r => r.skuCode || '未命名').slice(0, 5).join('、');
-      const msg = `${noFrontImg.length} 个款号缺少商品白底图（${codes}${noFrontImg.length > 5 ? '...' : ''}），生成结果可能不准确`;
-      if (noFrontImg.length === targetRows.length) { addToast('error', msg); return; }
-      addToast('warning', msg);
-    }
-
     const visionModel = getVisionModel();
     const textModel = getTextModel();
     if (!visionModel || !textModel) {
-      addToast('warning', '请先在系统设置中启用 LLM 模型（Kimi + DeepSeek）');
+      addToast('warning', '请先在系统设置中启用 LLM 模型（多模态 + DeepSeek）');
       return;
     }
 
-    // 确保 KEY 池已同步（在计算 concurrency 之前）
-    syncKeyPools();
+    const isHybrid = globalModel === HYBRID_MODEL_ID;
+    const isPipeline = workflowStage === 'pipeline';
+    const preset = RESOLUTION_PRESETS.find((p) => p.label === globalResolution);
+    const batchId = `batch_${genId()}`;
+    const batchLabel = `${new Date().toLocaleString('zh-CN')} · ${targetRows.length}款`;
 
     abortRef.current = false;
     rowResultsRef.current = new Map();
     setIsRunning(true);
     setAiStatus({ step: 0, message: '准备中...' });
 
-    const batchId = `batch_${genId()}`;
-    const batchLabel = `${new Date().toLocaleString('zh-CN')} · ${targetRows.length}款`;
-    const isHybrid = globalModel === HYBRID_MODEL_ID;
-    const preset = RESOLUTION_PRESETS.find((p) => p.label === globalResolution);
-    const yunwuKeyCount = availableKeyCount('yunwu');
-    const grsaiKeyCount = availableKeyCount('grsai');
-
-    // 并发数：混合模式用全部 KEY，单引擎用对应引擎的 KEY
-    const concurrency = isHybrid ? (yunwuKeyCount + grsaiKeyCount) :
-      (getProvider(globalModel) === 'yunwu' ? yunwuKeyCount : grsaiKeyCount);
+    // 获取选择的管道工作流配置
+    const selectedWorkflow = PIPELINE_WORKFLOWS.find(wf => wf.id === selectedPipelineWorkflow)?.config || MAIN_BATCH_WORKFLOW;
 
     try {
-      // ===== Phase 1: Kimi 分析模特图（共享模式） =====
-      let sharedInvariant = '';
-      const skuRows = targetRows.filter((r) => !!r.skuCode.trim());
-
-      if (mode === 'shared' && sharedModelImage && skuRows.length > 0) {
-        if (abortRef.current) return;
-        setAiStatus({ step: 1, message: 'Kimi 正在分析模特图（约 15s）...' });
-        try {
-          let modelB64: string | undefined;
-
-          // 优先从 IndexedDB 加载 1024px 参考图（页面刷新后 previewUrl 仅为 300px 缩略图）
-          const cachedModel = await loadImage('__shared_model__');
-          if (cachedModel) {
-            modelB64 = cachedModel;
-          } else {
-            // 回退：从预览 URL 加载并压缩
-            const modelFile = await withTimeout(
-              blobUrlToFile(sharedModelImage.previewUrl, sharedModelImage.name),
-              20000, 'Phase1 blobUrlToFile',
-            );
-            modelB64 = await withTimeout(
-              compressImageForLLM(modelFile),
-              20000, 'Phase1 compressImageForLLM',
-            );
-          }
-
-          if (!modelB64) throw new Error('无法加载模特图');
-          sharedInvariant = await withTimeout(
-            analyzeModelImage(visionModel, modelB64),
-            90000, 'Phase1 analyzeModelImage',
-          );
-        } catch (e) {
-          console.warn('[Phase1] Kimi 模特分析失败，使用通用描述', e);
-          sharedInvariant = 'Maintain model pose, facial expression, lighting and composition from reference.';
-        }
-      }
-
-      // ===== Phase 1.5: Logo 预处理 + 模特库选择 =====
-      let logoB64: string | undefined;
-      if (logoImage?.previewUrl) {
-        try {
-          const lf = await withTimeout(blobUrlToFile(logoImage.previewUrl, logoImage.name), 15000, 'logoFile');
-          logoB64 = await withTimeout(compressImageForLLM(lf), 15000, 'logoCompress');
-        } catch { /* logo 加载失败不阻塞主流程 */ }
-      }
-
-      // 如果选了模特库中的模特且未手动上传，使用库中的模特图
-      if (selectedModel && !sharedModelImage && mode === 'shared') {
-        setSharedModelImage({
-          id: selectedModel.id, type: 'model',
-          previewUrl: selectedModel.previewUrl,
-          name: selectedModel.originalName, size: selectedModel.size,
-        });
-      }
-
-      // ===== Phase 2: 每行 LLM 分析 + 入队 =====
-      type ImageTask = {
-        rowId: string; skuCode: string; productB64: string; modelB64: string | undefined;
-        prompt: string; count: number; idxInRow: number;
-        modelId: string;
-      };
-      const queue: ImageTask[] = [];
-
-      // 信号量
-      const semKimi = { n: 0, q: [] as (() => void)[] };
-      const semDs = { n: 0, q: [] as (() => void)[] };
-      const acq = async (s: typeof semKimi, max: number) => {
-        if (s.n < max) { s.n++; return; }
-        await new Promise<void>(r => s.q.push(r)); s.n++;
-      };
-      const rel = (s: typeof semKimi) => { s.n--; s.q.shift()?.(); };
-
-      // 预加载 IndexedDB 参考图缓存 + 预压缩模特图
-      const refCache = new Map<string, string>();
-      async function getRefB64(id: string, type: 'front' | 'model'): Promise<string> {
-        const key = `${id}_${type}`;
-        if (refCache.has(key)) return refCache.get(key)!;
-        const cached = await loadImage(key);
-        if (cached) { refCache.set(key, cached); return cached; }
-        return '';
-      }
-
-      let sharedModelB64: string | undefined;
-      if (mode === 'shared' && sharedModelImage?.previewUrl) {
-        const cached = await loadImage('__shared_model__');
-        if (cached) { sharedModelB64 = cached; }
-        else {
-          try {
-            const mf = await withTimeout(
-              blobUrlToFile(sharedModelImage.previewUrl, sharedModelImage.name),
-              15000, 'sharedModel blobUrlToFile',
-            );
-            sharedModelB64 = await withTimeout(
-              compressImageForRef(mf),
-              15000, 'sharedModel compressImageForRef',
-            );
-          } catch {}
-        }
-      }
-
-      // ===== Phase 2: 流式处理 — LLM 分析 + 入队（与 Phase 3 生图并发） =====
-      const totalKeys = yunwuKeyCount + grsaiKeyCount;
-      let llmDone = false;
-      let queueIdx = 0;
-      let completedInRun = 0;
-      const queueLock = { waiting: null as (() => void) | null };
-
-      // Phase 3 workers 提前启动 — 与 LLM 分析并发执行
-      const workOne = async (): Promise<void> => {
-        while (true) {
-          if (abortRef.current) return;
-
-          // 从队列取任务
-          let task: ImageTask | undefined;
-          const checkQueue = () => {
-            const idx = queueIdx++;
-            if (idx < queue.length) {
-              task = queue[idx];
-              return true;
-            }
-            queueIdx--; // 回退
-            return false;
-          };
-
-          if (!checkQueue()) {
-            if (llmDone) return; // LLM 全完成 + 队列已消化 → 退出
-            // 等待新任务入队
-            await new Promise<void>((r) => { queueLock.waiting = r; });
-            queueLock.waiting = null;
-            continue;
-          }
-
-          try {
-            const realUrl = await generateTryOnImage({
-              prompt: task!.prompt, productImageBase64: task!.productB64,
-              modelImageBase64: task!.modelB64,
-              width: preset?.width || 2448, height: preset?.height || 3264,
-              modelId: task!.modelId,
-            });
-
-            completedInRun++;
-            setAiStatus({ step: 3, message: `生图 ${completedInRun} · ${task!.skuCode}` });
-
-            const rowEntry = rowResultsRef.current.get(task!.rowId) || { urls: [], error: '' };
-            rowEntry.urls.push(realUrl);
-            rowResultsRef.current.set(task!.rowId, rowEntry);
-
-            setRows((prev) => prev.map((r) => {
-              if (r.id !== task!.rowId) return r;
-              const urls = [...r.resultUrls, realUrl];
-              return { ...r, resultUrls: urls, runningIdx: urls.length, status: urls.length >= (task!.count || 1) ? 'done' as const : 'generating' as const };
-            }));
-
-            if (autoDownload && saveFolderHandle) {
-              const skuName = task!.skuCode || `manual_${task!.rowId.slice(-6)}`;
-              try {
-                const subFolder = await saveFolderHandle.getDirectoryHandle(skuName, { create: true });
-                const resp = await fetch(realUrl);
-                const blob = await resp.blob();
-                const fh = await subFolder.getFileHandle(`${skuName}_${task!.idxInRow + 1}.png`, { create: true });
-                const w = await fh.createWritable(); await w.write(blob); await w.close();
-              } catch {}
-            }
-          } catch (e) {
-            completedInRun++;
-            const errMsg = e instanceof Error ? e.message : String(e);
-            console.error(`[worker] ${task!.skuCode} failed:`, errMsg);
-            const rowErr = rowResultsRef.current.get(task!.rowId) || { urls: [], error: '' };
-            rowErr.error = rowErr.error ? rowErr.error + '; ' + errMsg.slice(0, 80) : errMsg.slice(0, 80);
-            rowResultsRef.current.set(task!.rowId, rowErr);
-            setRows((prev) => prev.map((r) => {
-              if (r.id !== task!.rowId) return r;
-              const prefix = r.error ? r.error + '; ' : '';
-              return { ...r, error: prefix + `#${task!.idxInRow + 1}: ${errMsg.slice(0, 80)}` };
-            }));
-          }
-        }
-      };
-
-      // 启动 Phase 3 workers（先于 Phase 2）
-      setAiStatus({ step: 3, message: `${concurrency}路并发 · 流式生图` });
-      const workers = Array.from({ length: concurrency }, () => workOne());
-
-      // Phase 2: LLM 分析每行 → 即时入队
-      const notifyGen = () => {
-        const w = queueLock.waiting;
-        if (w) { queueLock.waiting = null; w(); }
-      };
-
-      await Promise.all(targetRows.map(async (row) => {
-        if (abortRef.current) return;
-        setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: 'generating' as const, runningIdx: 0 } : r)));
-        const hasSku = !!row.skuCode.trim();
-
-        let finalPrompt = row.prompt;
-        let productB64 = '';
-        let modelB64: string | undefined;
-
-        try {
-          productB64 = await getRefB64(row.id, 'front');
-          if (!productB64 && row.frontImage?.previewUrl) {
-            try {
-              const pf = await withTimeout(blobUrlToFile(row.frontImage.previewUrl, row.frontImage.name), 15000, `product File ${row.skuCode}`);
-              productB64 = await withTimeout(compressImageForRef(pf), 15000, `product compress ${row.skuCode}`);
-            } catch {}
-          }
-          modelB64 = mode === 'shared' ? sharedModelB64 : (await getRefB64(row.id, 'model'));
-          if (!modelB64 && mode !== 'shared' && row.modelImage?.previewUrl) {
-            try {
-              const mf = await withTimeout(blobUrlToFile(row.modelImage.previewUrl, row.modelImage.name), 15000, `model File ${row.skuCode}`);
-              modelB64 = await withTimeout(compressImageForRef(mf), 15000, `model compress ${row.skuCode}`);
-            } catch {}
-          }
-
-          if (hasSku && mode === 'shared' && sharedInvariant && row.frontImage?.previewUrl) {
-            let garmentVisualDetails = '';
-            try {
-              const pf = await withTimeout(blobUrlToFile(row.frontImage.previewUrl, row.frontImage.name), 15000, `blobUrlToFile ${row.skuCode}`);
-              const llmB64 = await withTimeout(compressImageForLLM(pf), 15000, `compressImageForLLM ${row.skuCode}`);
-              await acq(semKimi, 2);
-              try {
-                const analyzeFn = logoB64 ?
-                  (() => analyzeProductWithLogo(visionModel, llmB64, logoB64)) :
-                  (() => analyzeProductImage(visionModel, llmB64));
-                garmentVisualDetails = await withTimeout(analyzeFn(), 90000, `analyzeProductImage ${row.skuCode}`);
-              } catch (e) { console.warn(`[Kimi] ${row.skuCode}:`, e); }
-              finally { rel(semKimi); }
-            } catch (e) { console.warn(`[Kimi-prep] ${row.skuCode}:`, e); }
-
-            await acq(semDs, 3);
-            try {
-              const pInfo = buildProductInfoString(row.lingmaoData) || `商品 ${row.skuCode}`;
-              const merged = garmentVisualDetails ? `${pInfo}\n\n【白底图视觉细节】\n${garmentVisualDetails}` : pInfo;
-              finalPrompt = await withTimeout(assembleFinalPrompt(textModel, sharedInvariant, merged), 120000, `assembleFinalPrompt ${row.skuCode}`);
-            } catch (e) {
-              console.warn(`[DeepSeek] ${row.skuCode}:`, e);
-              const pInfo = buildProductInfoString(row.lingmaoData) || '';
-              finalPrompt = pInfo ? `${sharedInvariant}\n\nThe garment to try on: ${pInfo}` : '';
-            } finally { rel(semDs); }
-          }
-        } catch (e) {
-          console.warn(`[batch] Row ${row.skuCode} prep failed:`, e);
-        }
-
-        if (!finalPrompt) finalPrompt = row.prompt || 'Professional fashion e-commerce photography, model wearing the garment, soft studio lighting, 8K quality';
-
-        // 即时入队 + 通知 workers
-        for (let ci = 0; ci < (row.count || 1); ci++) {
-          let taskModelId = globalModel;
-          if (isHybrid) {
-            const useGrsai = grsaiKeyCount > 0 && (ci % totalKeys < grsaiKeyCount);
-            taskModelId = useGrsai ? 'gpt-image-2-vip' : 'gpt-image-2-all';
-          }
-          queue.push({ rowId: row.id, skuCode: row.skuCode || 'manual', productB64, modelB64, prompt: finalPrompt, count: row.count || 1, idxInRow: ci, modelId: taskModelId });
-        }
-        notifyGen();
-
-        setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, prompt: finalPrompt } : r)));
-      }));
-
-      // 标记 LLM 全完成 + 唤醒 workers
-      llmDone = true;
-      notifyGen();
-
-      if (queue.length === 0 || abortRef.current) { setIsRunning(false); return; }
-
-      await Promise.all(workers);
-
-      // 按行写入历史
-      for (const targetRow of targetRows) {
-        const rowData = rowResultsRef.current.get(targetRow.id);
-        const planned = targetRow.count || 1;
-        const actual = rowData ? rowData.urls.length : 0;
-        const errMsg = rowData?.error || '';
-        addTask({
-          id: genId(), type: 'tryon',
-          skuCode: targetRow.skuCode || '未命名', productName: targetRow.productName || '',
-          modelId: globalModel,
-          provider: isHybrid ? 'hybrid' : getProvider(globalModel),
-          prompt: targetRow.prompt?.slice(0, 200) || '',
-          params: { model: globalModel, resolution: globalResolution },
-          status: abortRef.current ? 'failed' : (actual >= planned ? 'completed' : (actual > 0 ? 'partial' : 'failed')),
-          progress: planned > 0 ? Math.round((actual / planned) * 100) : 0,
-          resultUrls: rowData?.urls.slice(0, 20) || [],
-          referenceUrls: sharedModelImage?.previewUrl ? [sharedModelImage.previewUrl] : [],
-          error: abortRef.current ? '用户终止' : (errMsg?.slice(0, 500) || (actual === 0 ? '未返回结果' : '')),
-          createdAt: new Date().toISOString(), completedAt: new Date().toISOString(),
-          batchId, batchLabel,
-        });
-      }
+      // 管道引擎驱动：准备 → LLM分析 → 并发生图 → Mimo校验 → 完成
+      await runBatchWithPipeline({
+        rows,
+        globalModel,
+        globalResolution: preset ? { width: preset.width, height: preset.height } : undefined,
+        isHybrid,
+        hasLingmaoData: rows.some(r => !!r.lingmaoData),
+        visionModel,
+        textModel,
+        logoImage,
+        selectedModelId,
+        abortRef,
+        rowResultsRef,
+        pendingRef,
+        batchId,
+        batchLabel,
+        addTask,
+        updateTask,
+        autoDownload,
+        saveFolderHandle,
+        onProgress: (msg) => setAiStatus((prev) => ({ step: prev.step, message: msg })),
+        onPromptUpdate: (rowId, prompt) => setRows((prev) => prev.map((r) => r.id === rowId ? { ...r, prompt } : r)),
+        startFlushTimer,
+        stopFlushTimer,
+        addToast,
+        setRowsGenerating: (ids) => setRows((prev) => prev.map((r) => ids.has(r.id) ? { ...r, status: 'generating' as const, runningIdx: 0 } : r)),
+        workflow: selectedWorkflow,
+      });
 
       setAiStatus({
         step: 4,
-        message: abortRef.current ? `已终止 · ${completedInRun}/${queue.length}` : `完成 · ${completedInRun} 张`,
+        message: abortRef.current ? `已终止` : `完成 · ${targetRows.length} 款`,
       });
     } catch (e) {
       console.error('[handleRun] ERROR:', e);
       addToast('error', '批量处理失败: ' + (e instanceof Error ? e.message : '未知错误'));
     } finally {
-      setIsRunning(false);
+      stopFlushTimer();
       setRows((prev) => prev.map((r) => (r.status === 'generating' ? { ...r, status: 'idle' as const, runningIdx: 0 } : r)));
+      setIsRunning(false);
+
+      // Pipeline continuation: main → pose → detail
+      if (isPipeline && !abortRef.current) {
+        const doneRowIds = new Set<string>();
+        for (const [rowId, data] of rowResultsRef.current) {
+          if (data.urls.length > 0) doneRowIds.add(rowId);
+        }
+        const doneRows = targetRows.filter(r => doneRowIds.has(r.id));
+        if (doneRows.length > 0) {
+          if (pipelinePoseTemplateId) {
+            setAiStatus({ step: 2, message: '阶段2/3: 批量姿势裂变...' });
+            const poseTpl = templates.find(t => t.id === pipelinePoseTemplateId);
+            if (poseTpl && poseTpl.refImages.length > 0) {
+              await new Promise(r => setTimeout(r, 300));
+              await runPipelinePoseDetail('pose', poseTpl, doneRows);
+            }
+            if (abortRef.current) { addToast('warning', '流水线在姿势裂变阶段终止'); return; }
+          }
+
+          if (pipelineDetailTemplateId && !abortRef.current) {
+            setAiStatus({ step: 3, message: '阶段3/3: 批量详情生成...' });
+            const detailTpl = templates.find(t => t.id === pipelineDetailTemplateId);
+            if (detailTpl && detailTpl.refImages.length > 0) {
+              await new Promise(r => setTimeout(r, 300));
+              await runPipelinePoseDetail('detail', detailTpl, doneRows);
+            }
+          }
+
+          setAiStatus({ step: 4, message: '贯穿流水线完成!' });
+          addToast('success', `贯穿流水线: ${doneRows.length} 款 主图→姿势→详情 完成`);
+        }
+      }
     }
   };
 
   // ===== Render =====
   const hasRows = rows.length > 0;
+  // ===== 批量反推风格参考图提示词（逐张调用，1:1 映射无歧义）=====
+  const batchAnalyzeStylePrompts = async () => {
+    const visionModel = getVisionModel();
+    if (!visionModel) { addToast('warning', '请先启用多模态模型'); return; }
+    const rowsWithStyle = rows.filter(r => r.styleImage?.previewUrl);
+    if (rowsWithStyle.length === 0) { addToast('warning', '没有可反推的风格参考图'); return; }
+
+    setBatchAnalyzing(true);
+    let ok = 0;
+
+    try {
+      for (let i = 0; i < rowsWithStyle.length; i++) {
+        const rowId = rowsWithStyle[i].id;
+        const b64 = rowsWithStyle[i].styleImage?.previewUrl;
+        setAiStatus({ step: 0, message: `正在反推 ${i + 1}/${rowsWithStyle.length} 张风格图...` });
+        try {
+          const prompt = b64 ? await analyzeSingleRefImage(visionModel, b64) : '';
+          if (prompt) {
+            ok++;
+            setRows(prev => prev.map(r => r.id === rowId ? { ...r, prompt } : r));
+          }
+        } catch (e) {
+          console.warn('[Batch] 反推失败:', e);
+        }
+      }
+      addToast('success', `批量反推完成: ${ok}/${rowsWithStyle.length} 张`);
+      setAiStatus({ step: 0, message: '' });
+    } catch (e) {
+      addToast('error', '批量反推失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setBatchAnalyzing(false);
+    }
+  };
+
   const stop = () => {
     abortRef.current = true;
     setAiStatus({ step: 0, message: '正在终止...' });
     setRows((prev) => prev.map((r) => (r.status === 'generating' ? { ...r, status: 'idle' as const, runningIdx: 0 } : r)));
   };
-  const clearAll = () => { setRows([]); setSharedModelImage(null); localStorage.removeItem(LS_BATCH); clearImageStore(); };
+  const clearAll = () => {
+    if (!confirm(`确认清空全部 ${rows.length} 行数据？此操作不可撤销。`)) return;
+    setRows([]); localStorage.removeItem(LS_BATCH); clearImageStore();
+  };
   const failedCount = rows.filter((r) => r.status === 'failed').length;
 
-  const handleRetry = (id: string) => {
+  const handleRetry = useCallback((id: string) => {
     setRows((prev) => prev.map((r) => {
       if (r.id !== id) return r;
       const keptUrls = r.resultUrls || [];
       const remaining = Math.max(1, r.count - keptUrls.length);
       return { ...r, status: 'idle' as const, error: '', count: remaining, runningIdx: 0 };
     }));
-  };
+  }, []);
 
   const handleCompare = useCallback((row: BatchRow, index: number) => {
-    setCompareBefore(
-      (mode === 'shared' ? sharedModelImage?.previewUrl : row.modelImage?.previewUrl) || ''
-    );
+    setCompareBefore(row.modelImage?.previewUrl || '');
     setCompareImages(
       row.resultUrls.map((url, i) => ({
         url,
@@ -951,7 +1154,7 @@ export function BatchGenerate() {
     );
     setCompareIndex(index);
     setCompareOpen(true);
-  }, [mode, sharedModelImage]);
+  }, []);
 
   const handleRetryAllFailed = () => {
     setRows((prev) => prev.map((r) => {
@@ -961,15 +1164,6 @@ export function BatchGenerate() {
       return { ...r, status: 'idle' as const, error: '', count: remaining, runningIdx: 0 };
     }));
   };
-  const handleSharedModelUpload = async (file: File) => {
-    if (!file.type.startsWith('image/')) return;
-    if (file.size > 50 * 1024 * 1024) { addToast('warning', '单文件最大 50MB'); return; }
-    const thumb = await makeThumb(file);
-    if (thumb) thumbRef.current.set('__shared_model__', thumb);
-    persistRefImage('__shared_model__', file); // IndexedDB: 1024px 参考图
-    setSharedModelImage({ id: genId(), type: 'model', previewUrl: URL.createObjectURL(file), name: file.name, size: file.size });
-  };
-
   return (
     <div className="max-w-7xl mx-auto space-y-5 animate-fade-in">
       {/* Header */}
@@ -996,10 +1190,17 @@ export function BatchGenerate() {
             <button onClick={handleRetryAllFailed} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-forge-orange hover:text-forge-cyan border border-forge-orange/30 rounded-lg transition-colors"><RefreshCw size={13} />重试失败({failedCount})</button>
           )}
           <button onClick={clearAll} disabled={!hasRows || isRunning} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-forge-red/60 hover:text-forge-red border border-forge-red/20 rounded-lg transition-colors disabled:opacity-30"><Trash2 size={13} />清空</button>
+          {hasRows && !isRunning && (
+            <button onClick={batchAnalyzeStylePrompts} disabled={batchAnalyzing || !rows.some(r => r.styleImage?.previewUrl)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-purple-500/15 text-purple-300 border border-purple-400/30 rounded-lg transition-colors hover:bg-purple-500/20 disabled:opacity-50">
+              {batchAnalyzing ? <Loader2 size={13} className="animate-spin" /> : <BookTemplate size={13} />}
+              批量反推
+            </button>
+          )}
           {isRunning ? (
             <button onClick={stop} className="px-4 py-2 rounded-lg text-sm flex items-center gap-2 bg-forge-red/15 text-forge-red border border-forge-red/30 hover:bg-forge-red/20"><StopCircle size={14} />终止</button>
           ) : (
-            <button onClick={handleRun} disabled={readyCount === 0} className="orange-btn px-4 py-2 rounded-lg text-sm flex items-center gap-2 disabled:opacity-50"><Play size={14} />批量生成 ({readyCount})</button>
+            <button onClick={handleRun} disabled={readyCount === 0 || ((workflowStage === 'pose' || workflowStage === 'detail') && templateSlots.length === 0)} className="orange-btn px-4 py-2 rounded-lg text-sm flex items-center gap-2 disabled:opacity-50"><Play size={14} />{workflowStage === 'pose' ? `批量姿势裂变 (${readyCount})` : workflowStage === 'detail' ? `批量详情生成 (${readyCount})` : workflowStage === 'pipeline' ? `贯穿流水线 (${readyCount})` : `批量生成 (${readyCount})`}</button>
           )}
         </div>
       </div>
@@ -1016,6 +1217,63 @@ export function BatchGenerate() {
           </div>
         </div>
       )}
+
+      {/* Workflow Stage Selector */}
+      <div className="glass-card p-3">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-forge-text2 mr-2">工作流:</span>
+          <div className="flex gap-1 p-0.5 glass-card rounded-lg">
+            {([
+              { v: 'main' as WorkflowStage, l: '主图批量', desc: '白底图→主图' },
+              { v: 'pose' as WorkflowStage, l: '姿势裂变', desc: '主图→多姿势' },
+              { v: 'detail' as WorkflowStage, l: '详情批量', desc: '主图→详情页' },
+              { v: 'pipeline' as WorkflowStage, l: '贯穿流水线', desc: '全自动:主图→姿势→详情' },
+            ]).map((s) => (
+              <button key={s.v} onClick={() => setWorkflowStage(s.v)}
+                className={`px-3 py-1.5 rounded-md text-xs transition-all ${workflowStage === s.v ? 'bg-forge-cyan/15 text-forge-cyan font-medium' : 'text-forge-text2 hover:text-forge-text'}`}
+                title={s.desc}>
+                {s.l}
+              </button>
+            ))}
+          </div>
+          {workflowStage === 'pipeline' && (
+            <span className="text-[10px] text-forge-orange ml-2">贯穿模式：先主图→再裂变→最后详情，全自动串联</span>
+          )}
+        </div>
+
+        {/* Pipeline Workflow Selector */}
+        <div className="mt-3 pt-3 border-t border-forge-border/20">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-forge-text2 mr-2">管道工作流:</span>
+            <select
+              value={selectedPipelineWorkflow}
+              onChange={(e) => setSelectedPipelineWorkflow(e.target.value)}
+              className="input-field !py-1 text-xs !w-auto min-w-[200px]"
+            >
+              {PIPELINE_WORKFLOWS.map((wf) => (
+                <option key={wf.id} value={wf.id}>{wf.name}</option>
+              ))}
+            </select>
+            <span className="text-[10px] text-forge-text2/60">
+              {PIPELINE_WORKFLOWS.find(wf => wf.id === selectedPipelineWorkflow)?.desc}
+            </span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1">
+            {PIPELINE_WORKFLOWS.find(wf => wf.id === selectedPipelineWorkflow)?.config.stages.map((stage) => (
+              <span
+                key={stage.id}
+                className={`px-2 py-0.5 rounded text-[10px] ${
+                  stage.enabled
+                    ? 'bg-forge-cyan/15 text-forge-cyan'
+                    : 'bg-forge-surface2/60 text-forge-text2/40 line-through'
+                }`}
+              >
+                {stage.id}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
 
       {/* Global Config */}
       <div className="glass-card p-4">
@@ -1045,8 +1303,8 @@ export function BatchGenerate() {
               if (globalModel === HYBRID_MODEL_ID) {
                 const total = totalAvailableKeys();
                 return (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300">
-                    🚀 混合 · {total}KEY
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300 flex items-center gap-1" title="混合引擎按加权健康评分自动在 Yunwu 和 Grsai 间分配任务。成功率高的引擎分到更多任务，支持熔断自动切换。">
+                    🚀 混合 · {total}KEY <Info size={10} />
                   </span>
                 );
               }
@@ -1077,17 +1335,17 @@ export function BatchGenerate() {
               <option value="">手动上传</option>
               {models.map((m) => <option key={m.id} value={m.id}>{m.name} ({m.category === 'tops' ? '上' : m.category === 'bottoms' ? '下' : '通'})</option>)}
             </select>
-            {!selectedModelId && (
-              <button onClick={() => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.onchange = () => { const f = inp.files?.[0]; if (f) handleSharedModelUpload(f); }; inp.click(); }}
-                className="text-[10px] text-forge-cyan hover:underline whitespace-nowrap">上传</button>
-            )}
           </div>
 
           <div className="flex items-center gap-2">
             <label className="text-xs text-forge-text2 whitespace-nowrap">模板</label>
             <select value={selectedTemplateId} onChange={(e) => setSelectedTemplateId(e.target.value)} className="input-field !py-1 text-xs !w-auto min-w-[120px]">
               <option value="">自定义</option>
-              {templates.filter((t) => t.type === 'main').map((t) => <option key={t.id} value={t.id}>{t.name} ({t.garmentCategory === 'tops' ? '上' : '下'})</option>)}
+              {templates.filter((t) => {
+                if (workflowStage === 'pose') return t.type === 'pose';
+                if (workflowStage === 'detail') return t.type === 'detail';
+                return t.type === 'main';
+              }).map((t) => <option key={t.id} value={t.id}>{t.name} ({t.garmentCategory === 'tops' ? '上' : '下'})</option>)}
             </select>
             {selectedTemplateId && (
               <span className="text-[10px] text-forge-text2/60 truncate max-w-32" title={selectedTemplate?.promptTemplate}>{selectedTemplate?.promptTemplate?.slice(0, 30)}...</span>
@@ -1106,7 +1364,33 @@ export function BatchGenerate() {
                 className="text-[10px] text-forge-text2/40 hover:text-forge-cyan border border-dashed border-forge-border/40 rounded px-2 py-0.5">上传</button>
             )}
           </div>
+
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-forge-text2 whitespace-nowrap">风格参考</label>
+            <span className="text-[10px] text-forge-text2/40">勾选模板后点应用到全部，或每行单独上传</span>
+          </div>
         </div>
+
+        {/* Pipeline template selectors */}
+        {workflowStage === 'pipeline' && (
+          <div className="flex items-center gap-4 mt-3 pt-3 border-t border-forge-orange/30 flex-wrap">
+            <span className="text-[10px] text-forge-orange font-medium">贯穿配置:</span>
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-forge-text2 whitespace-nowrap">姿势模板</label>
+              <select value={pipelinePoseTemplateId} onChange={(e) => setPipelinePoseTemplateId(e.target.value)} className="input-field !py-1 text-xs !w-auto min-w-[100px]">
+                <option value="">默认姿势模板</option>
+                {templates.filter(t => t.type === 'pose').map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-forge-text2 whitespace-nowrap">详情模板</label>
+              <select value={pipelineDetailTemplateId} onChange={(e) => setPipelineDetailTemplateId(e.target.value)} className="input-field !py-1 text-xs !w-auto min-w-[100px]">
+                <option value="">默认详情模板</option>
+                {templates.filter(t => t.type === 'detail').map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </div>
+          </div>
+        )}
 
         {/* Download Path */}
         <div className="flex items-center gap-4 mt-3 pt-3 border-t border-forge-border/20">
@@ -1124,57 +1408,85 @@ export function BatchGenerate() {
         </div>
       </div>
 
-      {/* Import + Model */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="glass-card p-4">
-          <h3 className="text-xs text-forge-text2 mb-3 flex items-center gap-2"><FolderOpen size={14} />导入商品白底图</h3>
-          <p className="text-[10px] text-forge-text2/50 mb-3">命名格式：<span className="text-forge-cyan font-mono">款号_正面.png</span> / <span className="text-forge-cyan font-mono">款号_反面.png</span></p>
-          <div className="flex gap-2">
-            <button onClick={() => {
-              const inp = document.createElement('input'); inp.type = 'file';
-              inp.webkitdirectory = true; inp.setAttribute('directory', ''); inp.setAttribute('multiple', '');
-              inp.onchange = () => { if (inp.files && inp.files.length > 0) handleFolderImport(inp.files); };
-              inp.click();
-            }} className="flex-1 border-2 border-dashed border-forge-border/50 rounded-xl py-4 text-center hover:border-forge-cyan/30 transition-colors group">
-              <FolderOpen size={20} className="mx-auto text-forge-text2/25 group-hover:text-forge-cyan/40 mb-1" />
-              <p className="text-xs text-forge-text2/50">选择文件夹导入</p>
-            </button>
-            <button onClick={addManualRow} className="flex-1 border-2 border-dashed border-forge-border/40 rounded-xl py-4 text-center hover:border-forge-orange/30 transition-colors group">
-              <PlusCircle size={20} className="mx-auto text-forge-text2/25 group-hover:text-forge-orange/40 mb-1" />
-              <p className="text-xs text-forge-text2/50">手动添加一行</p>
-            </button>
+      {/* Template Slot Preview (pose/detail mode) */}
+      {(workflowStage === 'pose' || workflowStage === 'detail') && templateSlots.length > 0 && (
+        <div className="glass-card p-4 border border-forge-cyan/30">
+          <h3 className="text-xs text-forge-text2 mb-3 flex items-center gap-2">
+            <BookTemplate size={14} />
+            {workflowStage === 'pose' ? '姿势模板槽位' : '详情模板槽位'} — {templateSlots.length} 张参考图，1:1 对应生成
+          </h3>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+            {templateSlots.map((slot) => (
+              <div key={slot.refIndex} className="glass-card overflow-hidden border border-forge-border/20">
+                <div className="aspect-[3/4] bg-forge-surface2/50 flex items-center justify-center relative group">
+                  <img src={slot.refUrl} alt="" className="w-full h-full object-cover" loading="lazy" decoding="async" />
+                  <button onClick={() => {
+                    const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+                    inp.onchange = () => { const f = inp.files?.[0]; if (f) replaceSlotImage(slot.refIndex, f); };
+                    inp.click();
+                  }} className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <span className="text-[10px] text-white bg-forge-cyan/70 px-2 py-1 rounded">更换参考图</span>
+                  </button>
+                </div>
+                <div className="p-2">
+                  <span className="text-[9px] text-forge-text2/50 font-medium">#{slot.refIndex + 1}</span>
+                  <textarea
+                    value={slot.prompt}
+                    onChange={(e) => updateSlotPrompt(slot.refIndex, e.target.value)}
+                    className="textarea-field !min-h-[40px] !py-1 text-[10px] w-full"
+                    placeholder="姿势提示词..."
+                    disabled={isRunning}
+                  />
+                </div>
+              </div>
+            ))}
           </div>
-          {hasRows && <p className="mt-2 text-[10px] text-forge-cyan">{rows.length} 行 · {totalPlanned} 张</p>}
+        </div>
+      )}
+
+      {/* Import + SKU Input */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="glass-card p-4">
+          <h3 className="text-xs text-forge-text2 mb-3 flex items-center gap-2"><FolderOpen size={14} />导入白底图</h3>
+          <p className="text-[10px] text-forge-text2/50 mb-3">命名：<span className="text-forge-cyan font-mono">款号_正面.png</span></p>
+          <button onClick={() => {
+            const inp = document.createElement('input'); inp.type = 'file';
+            inp.webkitdirectory = true; inp.setAttribute('directory', ''); inp.setAttribute('multiple', '');
+            inp.onchange = () => { if (inp.files && inp.files.length > 0) handleFolderImport(inp.files); };
+            inp.click();
+          }} className="w-full border-2 border-dashed border-forge-border/50 rounded-xl py-4 text-center hover:border-forge-cyan/30 transition-colors group mb-2">
+            <FolderOpen size={20} className="mx-auto text-forge-text2/25 group-hover:text-forge-cyan/40 mb-1" />
+            <p className="text-xs text-forge-text2/50">选择文件夹导入</p>
+          </button>
+          <button onClick={addManualRow} className="w-full border-2 border-dashed border-forge-border/40 rounded-xl py-3 text-center hover:border-forge-orange/30 transition-colors group">
+            <PlusCircle size={18} className="mx-auto text-forge-text2/25 group-hover:text-forge-orange/40 mb-1" />
+            <p className="text-xs text-forge-text2/50">手动添加一行</p>
+          </button>
         </div>
 
         <div className="glass-card p-4">
-          <h3 className="text-xs text-forge-text2 mb-3 flex items-center gap-2"><User size={14} />模特参考图</h3>
-          <div className="flex gap-1 p-0.5 glass-card rounded-lg mb-3">
-            {[{ v: 'shared' as const, l: '共享一张' }, { v: 'individual' as const, l: '各款独立' }].map((item) => (
-              <button key={item.v} onClick={() => setMode(item.v)}
-                className={`flex-1 px-3 py-1.5 rounded-md text-xs transition-all ${mode === item.v ? 'bg-forge-cyan/15 text-forge-cyan font-medium' : 'text-forge-text2 hover:text-forge-text'}`}>
-                {item.l}
-              </button>
-            ))}
+          <h3 className="text-xs text-forge-text2 mb-3 flex items-center gap-2"><Search size={14} />批量款号关联</h3>
+          <p className="text-[10px] text-forge-text2/50 mb-3">输入款号自动关联款式库中的<span className="text-forge-green">商品资料+白底图</span></p>
+          <textarea value={skuCodeInput} onChange={e => setSkuCodeInput(e.target.value)}
+            placeholder="粘贴款号，每行一个或用逗号分隔&#10;例如：&#10;BM26B085CM&#10;BM26A050CM&#10;BM26B030CM"
+            className="textarea-field h-24 text-xs mb-2" />
+          <button onClick={handleSkuCodeImport}
+            className="w-full py-2 rounded-lg text-xs flex items-center justify-center gap-1.5 bg-forge-cyan/15 text-forge-cyan border border-forge-cyan/30 hover:bg-forge-cyan/20 transition-all">
+            <Link2 size={12} />一键关联 ({skuCodeInput.split(/[\n,;]+/).filter(Boolean).length || 0} 个款号)
+          </button>
+        </div>
+
+        <div className="glass-card p-4">
+          <h3 className="text-xs text-forge-text2 mb-3 flex items-center gap-2"><User size={14} />快速填充</h3>
+          <div className="flex items-center gap-3 flex-wrap">
+            <button onClick={applyModelToAllRows} className="text-[10px] px-2 py-1 rounded border border-forge-border/40 text-forge-text2 hover:text-forge-cyan hover:border-forge-cyan/30">
+              模特应用到全部
+            </button>
+            <button onClick={applyTemplateToAllRows} className="text-[10px] px-2 py-1 rounded border border-forge-border/40 text-forge-text2 hover:text-forge-cyan hover:border-forge-cyan/30">
+              模板风格应用到全部
+            </button>
+            <span className="text-[10px] text-forge-text2/40">每行可单独更换模特和风格参考</span>
           </div>
-          {mode === 'shared' ? (
-            sharedModelImage ? (
-              <div className="flex items-center gap-3 p-2 rounded-lg bg-forge-surface2/30">
-                <img src={sharedModelImage.previewUrl} alt="" loading="lazy" className="w-12 h-16 object-cover rounded border border-forge-border/30" />
-                <div className="flex-1 min-w-0"><p className="text-xs text-forge-text truncate">{sharedModelImage.name}</p><p className="text-[10px] text-forge-text2">所有款共用</p></div>
-                <button onClick={() => setSharedModelImage(null)} className="p-1 text-forge-text2/40 hover:text-forge-red"><X size={14} /></button>
-              </div>
-            ) : (
-              <button onClick={() => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.onchange = () => { const f = inp.files?.[0]; if (f) handleSharedModelUpload(f); }; inp.click(); }}
-                className="w-full border-2 border-dashed border-forge-border/40 rounded-xl py-4 text-center hover:border-forge-cyan/30 transition-colors group">
-                <Camera size={20} className="mx-auto text-forge-text2/25 group-hover:text-forge-cyan/40 mb-1" />
-                <p className="text-xs text-forge-text2/50">上传模特参考图</p>
-                <p className="text-[10px] text-forge-text2/30 mt-0.5">JPG/PNG/WebP</p>
-              </button>
-            )
-          ) : (
-            <p className="text-[10px] text-forge-text2/50 p-2 rounded bg-forge-surface2/30"><Info size={10} className="inline mr-1" />在表格中为每行单独上传</p>
-          )}
         </div>
       </div>
 
@@ -1185,9 +1497,12 @@ export function BatchGenerate() {
             <thead className="sticky top-0 bg-forge-surface z-10">
               <tr className="text-forge-text2/50 border-b border-forge-border/30 text-left">
                 <th className="py-2.5 px-2 w-16">款号</th>
-                {mode === 'individual' && <th className="py-2.5 px-1 w-12">模特</th>}
-                <th className="py-2.5 px-1 w-12">正面</th>
-                <th className="py-2.5 px-1 w-12">反面</th>
+                <th className="py-2.5 px-1 w-12">{workflowStage === 'main' ? '正面' : '主图'}</th>
+                <th className="py-2.5 px-1 w-12">模特</th>
+                <th className="py-2.5 px-1 w-12">风格</th>
+                {(workflowStage === 'pose' || workflowStage === 'detail' || workflowStage === 'pipeline') && (
+                  <th className="py-2.5 px-1 w-12">{workflowStage === 'pose' ? '姿势模板' : '详情模板'}</th>
+                )}
                 <th className="py-2.5 px-1 w-10">数量</th>
                 <th className="py-2.5 px-2">提示词</th>
                 <th className="py-2.5 px-2 w-20 text-center">状态</th>
@@ -1197,10 +1512,11 @@ export function BatchGenerate() {
             <tbody>
               {rows.map((row) => (
                 <BatchTableRow
-                  key={row.id} row={row} mode={mode} allModels={allModels}
+                  key={row.id} row={row}
                   isRunning={isRunning}
                   onUpdate={updateRow} onRemove={removeRow}
                   onModelUpload={handleModelUpload}
+                  onStyleUpload={handleStyleUpload}
                   onDownloadSingle={handleDownloadSingle}
                   onRetry={handleRetry}
                   onCompare={handleCompare}

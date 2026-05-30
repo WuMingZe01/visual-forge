@@ -1,9 +1,11 @@
-import { acquireKey, releaseKey, markKeyFailed, type KeyAssignment } from '@/services/keyPool';
+import { acquireKey, acquireKeyNoCooldown, releaseKey, markKeyFailed, markKeySuccess, type KeyAssignment } from '@/services/keyPool';
 
 export interface TryOnGenInput {
   prompt: string;
   modelImageBase64?: string;
   productImageBase64?: string;
+  styleRefBase64?: string;
+  detailImageBase64?: string;
   width: number;
   height: number;
   modelId: string;
@@ -53,7 +55,11 @@ async function fetchWithRetry(url: string, init: RequestInit, externalSignal?: A
     // 外部取消时立即中止
     if (externalSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
     try {
-      const resp = await fetchWithTimeout(url, init);
+      // Wire externalSignal into the fetch so in-flight requests are abortable
+      const mergedInit = externalSignal
+        ? { ...init, signal: combineSignals(init.signal ?? null, externalSignal) }
+        : init;
+      const resp = await fetchWithTimeout(url, mergedInit);
       if (resp.ok) return resp;
       const raw = await resp.text().catch(() => '');
       lastErr = new Error(`HTTP ${resp.status}: ${raw.slice(0, 300)}`);
@@ -88,10 +94,12 @@ function delay(ms: number) { return new Promise<void>((r) => setTimeout(r, ms));
 
 function getProvider(modelId: string): 'yunwu' | 'grsai' {
   if (modelId.startsWith('nano-banana')) return 'grsai';
+  // Grsai: gpt-image-2-vip (4K+多参考图), gpt-image-2 (默认·1024)
   if (modelId === 'gpt-image-2-vip') return 'grsai';
-  // gpt-image-2-all → Yunwu 的旗舰模型（支持多参考图+4K）
+  if (modelId === 'gpt-image-2') return 'grsai';
+  // Yunwu: gpt-image-2-all (4K+多参考图), gpt-image-1-mini (快速·推荐)
   if (modelId === 'gpt-image-2-all') return 'yunwu';
-  // gpt-image-2 → 默认 Yunwu
+  if (modelId === 'gpt-image-1-mini') return 'yunwu';
   return 'yunwu';
 }
 
@@ -113,22 +121,29 @@ function bareBase64(dataUrl: string): string {
  */
 export async function generateTryOnImage(input: TryOnGenInput): Promise<string> {
   const provider = getProvider(input.modelId);
-  const apiKey = await acquireKey(provider);
+  const apiKey = input.skipCooldown ? await acquireKeyNoCooldown(provider) : await acquireKey(provider);
 
   try {
-    if (input.modelId.startsWith('nano-banana')) return await generateViaGrsaiBanana(apiKey, input);
-    if (input.modelId === 'gpt-image-2-vip') return await generateViaGrsaiGenerate(apiKey, input);
-    if (input.modelId === 'gpt-image-2-all') return await generateViaYunwuAll(apiKey, input);
-    return await generateViaYunwu(apiKey, input);
+    let result: string;
+    if (input.modelId.startsWith('nano-banana')) result = await generateViaGrsaiBanana(apiKey, input);
+    else if (input.modelId === 'gpt-image-2-vip' || input.modelId === 'gpt-image-2') result = await generateViaGrsaiGenerate(apiKey, input);
+    else if (input.modelId === 'gpt-image-2-all') result = await generateViaYunwuAll(apiKey, input);
+    else if (input.modelId === 'gpt-image-1-mini') result = await generateViaYunwuMini(apiKey, input);
+    else result = await generateViaYunwu(apiKey, input);
+    markKeySuccess(provider, apiKey);
+    return result;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    // 429 限流是云平台过载，不是 KEY 本身问题，不标记失败
-    if (!msg.includes('429') && !msg.includes('rate limited') && !msg.includes('负载已饱和')) {
-      markKeyFailed(provider, apiKey);
+    if (msg.includes('429') || msg.includes('rate limited')) {
+      markKeyFailed(provider, apiKey, '429');
+    } else if (msg.includes('500') || msg.includes('502') || msg.includes('503')) {
+      markKeyFailed(provider, apiKey, '5xx');
+    } else if (msg.includes('fetch') || msg.includes('network') || msg.includes('abort') || msg.includes('timeout')) {
+      markKeyFailed(provider, apiKey, 'network');
+    } else if (!msg.includes('负载已饱和')) {
+      markKeyFailed(provider, apiKey, 'other');
     }
     throw e;
-  } finally {
-    releaseKey(provider, apiKey);
   }
 }
 
@@ -140,18 +155,40 @@ export { getProvider };
 export async function generateViaKey(input: TryOnGenInput, assignment: KeyAssignment): Promise<string> {
   const modelId = assignment.provider === 'yunwu' ? 'gpt-image-2-all' : 'gpt-image-2-vip';
   try {
+    let result: string;
     if (assignment.provider === 'grsai') {
-      return await generateViaGrsaiGenerate(assignment.key, { ...input, modelId });
+      result = await generateViaGrsaiGenerate(assignment.key, { ...input, modelId });
+    } else {
+      result = await generateViaYunwuAll(assignment.key, { ...input, modelId });
     }
-    return await generateViaYunwuAll(assignment.key, { ...input, modelId });
+    markKeySuccess(assignment.provider, assignment.key);
+    return result;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (!msg.includes('429') && !msg.includes('rate limited') && !msg.includes('负载已饱和')) {
-      markKeyFailed(assignment.provider, assignment.key);
+    if (msg.includes('429') || msg.includes('rate limited')) {
+      markKeyFailed(assignment.provider, assignment.key, '429');
+    } else if (msg.includes('500') || msg.includes('502') || msg.includes('503')) {
+      markKeyFailed(assignment.provider, assignment.key, '5xx');
+    } else if (msg.includes('fetch') || msg.includes('network') || msg.includes('abort') || msg.includes('timeout')) {
+      markKeyFailed(assignment.provider, assignment.key, 'network');
+    } else if (!msg.includes('负载已饱和')) {
+      markKeyFailed(assignment.provider, assignment.key, 'other');
     }
     throw e;
-  } finally {
-    releaseKey(assignment.provider, assignment.key);
+  }
+}
+
+/** Yunwu gpt-image-1-mini: 优先使用，连接失败自动降级到 gpt-image-2 */
+async function generateViaYunwuMini(apiKey: string, input: TryOnGenInput): Promise<string> {
+  try {
+    return await generateViaYunwu(apiKey, { ...input, modelId: 'gpt-image-1-mini' });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('fetch') || msg.includes('network') || msg.includes('timeout') || msg.includes('abort')) {
+      console.warn('[YunwuMini] gpt-image-1-mini 连接失败，降级到 gpt-image-2-all');
+      return await generateViaYunwu(apiKey, { ...input, modelId: 'gpt-image-2-all' });
+    }
+    throw e;
   }
 }
 
@@ -230,6 +267,8 @@ async function generateViaYunwuAll(apiKey: string, input: TryOnGenInput): Promis
   // 参考图通过 "image" 字段以文件形式传入（与 API 文档示例一致）
   // 第一张 = 模特参考图（主参考，保留构图/姿势）
   // 第二张 = 商品白底图（服装细节）
+  // 第三张 = 风格参考图（模板卡片参考图）
+  // 第四张 = 细节图（Logo/印花）
   if (input.modelImageBase64) {
     const blob = dataUrlToBlob(input.modelImageBase64);
     fd.append('image', blob, 'model_reference.jpg');
@@ -237,6 +276,14 @@ async function generateViaYunwuAll(apiKey: string, input: TryOnGenInput): Promis
   if (input.productImageBase64) {
     const blob = dataUrlToBlob(input.productImageBase64);
     fd.append('image', blob, 'product_reference.jpg');
+  }
+  if (input.styleRefBase64) {
+    const blob = dataUrlToBlob(input.styleRefBase64);
+    fd.append('image', blob, 'style_reference.jpg');
+  }
+  if (input.detailImageBase64) {
+    const blob = dataUrlToBlob(input.detailImageBase64);
+    fd.append('image', blob, 'detail_reference.jpg');
   }
 
   const resp = await fetchWithRetry(endpoint, {
@@ -267,9 +314,11 @@ async function generateViaGrsaiGenerate(apiKey: string, input: TryOnGenInput): P
   const h = input.height > 0 ? input.height : 3264;
 
   const images: string[] = [];
-  // 模特图放第一位（主参考），商品图第二位（服装细节）
+  // 模特图放第一位（主参考），商品图第二位（服装细节），风格参考图第三位，细节图第四位
   if (input.modelImageBase64) images.push(bareBase64(input.modelImageBase64));
   if (input.productImageBase64) images.push(bareBase64(input.productImageBase64));
+  if (input.styleRefBase64) images.push(bareBase64(input.styleRefBase64));
+  if (input.detailImageBase64) images.push(bareBase64(input.detailImageBase64));
 
   // gpt-image-2-vip: 用像素值 aspectRatio（如 "2448x3264"），支持 4K + 参考图
   // gpt-image-2:     用比例字符串（如 "3:4"），支持 1K + 参考图
@@ -337,15 +386,31 @@ async function generateViaGrsaiBanana(apiKey: string, input: TryOnGenInput): Pro
 }
 
 function parseGrsaiResponse(raw: string): string {
-  const data = strJson(raw);
+  // 先尝试 JSON 解析
+  let data = strJson(raw);
+
+  // 如果不是 JSON，尝试 SSE 格式 (data: {...}\n)
+  if (!data && raw.includes('data:')) {
+    const chunks = raw.split('\n').filter((line) => line.startsWith('data: '));
+    for (let i = chunks.length - 1; i >= 0; i--) {
+      const obj = strJson(chunks[i].slice(6));
+      if (obj) { data = obj; break; }
+    }
+  }
+
   if (!data) throw new Error(`Grsai response invalid: ${raw.slice(0, 300)}`);
   if (data.status === 'violation') throw new Error(`Grsai policy violation`);
-  if (data.status === 'failed') throw new Error(`Grsai 失败: ${JSON.stringify(data.error || '').slice(0, 300)}`);
+  if (data.status === 'failed') {
+    const errDetail = typeof data.error === 'string' ? data.error : JSON.stringify(data.error || '');
+    throw new Error(`Grsai 生成失败: ${errDetail.slice(0, 300)}`);
+  }
   const results = data.results as Record<string, unknown>[] | undefined;
   if (results?.[0]?.url) return results[0].url as string;
+  if (typeof data.url === 'string') return data.url;
+  if (typeof data.image_url === 'string') return data.image_url;
   const found = dig(data);
   if (found) return found;
-  throw new Error(`Grsai no image: ${raw.slice(0, 300)}`);
+  throw new Error(`Grsai no image URL in response: ${raw.slice(0, 300)}`);
 }
 
 function extractUrlFromRaw(raw: string): string | undefined {

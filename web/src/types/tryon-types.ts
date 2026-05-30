@@ -69,6 +69,12 @@ export interface SKUInfo {
   imgUrls: string[];
   sizeGuide: SizeGuide | null;
   fetchedAt: string;
+  /** 款式管理扩展字段 */
+  frontImageBase64?: string;
+  backImageBase64?: string;
+  logoImageBase64?: string;
+  reversePrompt?: string;
+  reversePromptGeneratedAt?: string;
 }
 
 export interface ReferenceImage {
@@ -122,6 +128,8 @@ export interface DetailSection {
 
 export const RESOLUTION_PRESETS = [
   { label: '1024×1024 (1:1, 1K)', width: 1024, height: 1024, ratio: '1:1', res: '1K' },
+  { label: '淘宝主图 800×800', width: 800, height: 800, ratio: '1:1', res: '800' },
+  { label: '淘宝详情页 750×1000', width: 750, height: 1000, ratio: '3:4', res: '750' },
   { label: '2048×2048 (1:1, 2K)', width: 2048, height: 2048, ratio: '1:1', res: '2K' },
   { label: '1536×1024 (3:2, 2K)', width: 1536, height: 1024, ratio: '3:2', res: '2K' },
   { label: '1024×1536 (2:3, 2K)', width: 1024, height: 1536, ratio: '2:3', res: '2K' },
@@ -133,7 +141,8 @@ export const RESOLUTION_PRESETS = [
 export const AI_MODELS_FOR_TRYON = [
   { id: 'gpt-image-2-vip', name: 'GPT Image 2 VIP', desc: 'Grsai·4K·双参考图' },
   { id: 'gpt-image-2-all', name: 'GPT Image 2 ALL', desc: 'Yunwu·4K·双参考图' },
-  { id: 'gpt-image-2', name: 'GPT Image 2', desc: 'Yunwu·4K·纯文生图' },
+  { id: 'gpt-image-2', name: 'GPT Image 2', desc: 'Grsai·默认·1024' },
+  { id: 'gpt-image-1-mini', name: 'GPT Image 1 Mini', desc: 'Yunwu·快速·推荐' },
   { id: 'nano-banana-pro', name: 'nano-banana Pro', desc: 'Grsai·创意' },
   { id: 'nano-banana-2', name: 'nano-banana-2', desc: 'Grsai·快速' },
   { id: 'gemini-3-pro-image-preview', name: 'Gemini 3 Pro', desc: 'Yunwu·高清' },
@@ -143,33 +152,39 @@ export const AI_MODELS_FOR_TRYON = [
 export interface ModelEntry {
   id: string;
   name: string;
-  category: 'tops' | 'bottoms' | 'both';
+  category: 'tops' | 'bottoms' | 'both' | 'accessories' | 'general';
   previewUrl: string;
   originalName: string;
   size: number;
   description: string;
   tags: string[];
+  /** Kimi反推提示词模板 — 喂给Kimi提取该模特不变特征的指令 */
+  reversePromptTemplate?: string;
   createdAt: string;
 }
 
 // ===== 模板库类型 =====
 export type TemplateCategory = 'main' | 'pose' | 'detail';
-export type GarmentCategory = 'tops' | 'bottoms';
+export type GarmentCategory = 'tops' | 'bottoms' | 'accessories' | 'general';
 
 export interface TemplateRefImage {
   id: string;
   name: string;
   size: number;
   dataUrl: string;  // 300px thumbnail for localStorage
+  /** per-image preset prompt (for pose/detail variations) */
+  prompt?: string;
 }
 
 export interface TemplateEntry {
   id: string;
   name: string;
   type: 'main' | 'pose' | 'detail';
-  garmentCategory: 'tops' | 'bottoms';
+  garmentCategory: GarmentCategory;
   description: string;
   promptTemplate: string;
+  /** Kimi反推提示词模板 — 与款式白底图反推提示词结合使用 */
+  reversePromptTemplate?: string;
   refImages: TemplateRefImage[];  // 上传的真实参考图
   createdAt: string;
   updatedAt: string;

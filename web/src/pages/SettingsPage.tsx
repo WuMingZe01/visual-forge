@@ -50,11 +50,14 @@ export function SettingsPage() {
   const [aiPrompts, setAiPrompts] = useState<AiPromptSet>(loadAiPrompts);
   const [aiPromptEditKey, setAiPromptEditKey] = useState<keyof AiPromptSet>('analyzeBoth');
 
-  const promptLabels: { key: keyof AiPromptSet; label: string }[] = [
-    { key: 'analyzeBoth', label: '主图 — Kimi 识别（模特图+白底图）' },
-    { key: 'analyzeModel', label: 'Kimi 通用 — 仅模特图反推（无白底图时）' },
-    { key: 'assembleTryon', label: '主图 — DeepSeek 整合生成' },
-    { key: 'assembleDetail', label: '详情页 — DeepSeek 生成' },
+  const promptLabels: { key: keyof AiPromptSet; label: string; desc: string }[] = [
+    { key: 'analyzeModel', label: '多模态 — 仅模特图反推', desc: '分析模特图提取不变特征' },
+    { key: 'analyzeBoth', label: '多模态 — 模特图+白底图双图分析', desc: '同时分析模特特征 + 服装细节（可选细节图）' },
+    { key: 'analyzeProduct', label: '多模态 — 仅白底图分析', desc: '款式管理中反推提示词时使用（可选细节图）' },
+    { key: 'batchAnalyzeRefs', label: '多模态 — 批量参考图反推', desc: '模板库中2-4张参考图一次分析，每张生成预设提示词' },
+    { key: 'assembleTryon', label: 'DeepSeek — 主图提示词整合', desc: '将不变特征+商品资料合并为生图提示词' },
+    { key: 'assemblePose', label: 'DeepSeek — 姿势裂变整合', desc: '为同一商品生成N个不同姿势的提示词' },
+    { key: 'assembleDetail', label: 'DeepSeek — 详情页整合', desc: '生成详情页各模块的生图提示词' },
   ];
 
   const handleSaveAiPrompts = () => {
@@ -115,7 +118,7 @@ export function SettingsPage() {
     addLlmConfig({
       id: genId(), name: newLlmName || newLlmModel, provider: 'custom',
       apiKey: newLlmKey, baseUrl: newLlmBaseUrl.trim(), model: newLlmModel.trim(),
-      type: newLlmType, enabled: true,
+      type: newLlmType, enabled: true, maxTokens: 1048576,
     });
     setNewLlmBaseUrl(''); setNewLlmModel(''); setNewLlmKey(''); setNewLlmName('');
     addToast('success', 'LLM 模型已添加');
@@ -234,7 +237,7 @@ export function SettingsPage() {
       {/* AI System Prompts */}
       <div className="glass-card p-6 border border-purple-500/20">
         <div className="flex items-center gap-2.5 mb-2"><Brain size={16} className="text-purple-400" /><h2 className="section-title !mb-0">AI 提示词管理</h2></div>
-        <p className="text-xs text-forge-text2 mb-4">管理 Kimi / DeepSeek 的系统提示词（System Prompt）。修改后影响所有页面的 AI 分析质量。</p>
+        <p className="text-xs text-forge-text2 mb-4">管理多模态模型 / DeepSeek 的系统提示词（System Prompt）。修改后影响所有页面的 AI 分析质量。</p>
 
         <div className="flex items-center gap-2 mb-3">
           <select value={aiPromptEditKey} onChange={(e) => setAiPromptEditKey(e.target.value as keyof AiPromptSet)} className="input-field !py-1.5 text-xs !w-auto">
@@ -265,6 +268,17 @@ export function SettingsPage() {
           <MaskedInput id="lingmao-secret" label="App Secret" value={lingmaoAppSecret} onChange={v => setLingmaoAppSecret(v)} />
         </div>
         <button onClick={handleSaveLingmao} className="orange-btn mt-4 px-5 py-2.5 rounded-lg text-sm flex items-center gap-2"><Save size={14} />保存领猫配置</button>
+
+        <div className="mt-6 pt-5 border-t border-forge-border/30">
+          <div className="flex items-center gap-2.5 mb-3"><Cloud size={14} className="text-forge-green" /><h3 className="text-forge-text text-sm font-medium">阿里云 OSS 配置</h3></div>
+          <p className="text-[10px] text-forge-text2/50 mb-3">用于存储生成图片，配置后可在任务历史中获取长期有效的图片链接</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div><label className="block text-xs text-forge-text2 mb-1.5">Access Key ID</label><input type="text" value={form.ossAccessKeyId || ''} onChange={e => update('ossAccessKeyId', e.target.value)} className="input-field" placeholder="LTAI5t8MsnWzzExkhjLJsJLN" /></div>
+            <MaskedInput id="oss-secret" label="Access Key Secret" value={form.ossAccessKeySecret || ''} onChange={v => update('ossAccessKeySecret', v)} />
+            <div><label className="block text-xs text-forge-text2 mb-1.5">Endpoint</label><input type="text" value={form.ossEndpoint || ''} onChange={e => update('ossEndpoint', e.target.value)} className="input-field" placeholder="oss-cn-beijing.aliyuncs.com" /></div>
+            <div><label className="block text-xs text-forge-text2 mb-1.5">Bucket</label><input type="text" value={form.ossBucket || ''} onChange={e => update('ossBucket', e.target.value)} className="input-field" placeholder="hermes-grsai" /></div>
+          </div>
+        </div>
 
         <div className="mt-6 pt-5 border-t border-forge-border/30">
           <div className="flex items-center gap-2 mb-3"><Cpu size={14} className="text-forge-cyan" /><h3 className="text-forge-text text-sm font-medium">自定义 AI 图像模型</h3></div>
@@ -358,10 +372,11 @@ function LlmCard({ cfg, onUpdate, onToggle, onRemove, addToast }: {
       </div>
       {testResult && <div className={`mx-3 mb-1 px-2 py-1 rounded text-[10px] ${testResult.startsWith('连接成功') ? 'bg-forge-green/10 text-forge-green' : 'bg-forge-red/10 text-forge-red'}`}>{testResult}</div>}
       {expanded && (
-        <div className="px-3 pb-3 grid grid-cols-1 md:grid-cols-3 gap-2 pt-1 border-t border-forge-border/20">
+        <div className="px-3 pb-3 grid grid-cols-1 md:grid-cols-4 gap-2 pt-1 border-t border-forge-border/20">
           <div><label className="text-[9px] text-forge-text2 block mb-0.5">API Base URL</label><input value={cfg.baseUrl} onChange={e => onUpdate(cfg.id, { baseUrl: e.target.value })} className="input-field !py-1 text-[10px]" /></div>
           <div><label className="text-[9px] text-forge-text2 block mb-0.5">Model ID</label><input value={cfg.model} onChange={e => onUpdate(cfg.id, { model: e.target.value })} className="input-field !py-1 text-[10px]" /></div>
           <div><label className="text-[9px] text-forge-text2 block mb-0.5">API Key</label><input type="password" value={cfg.apiKey} onChange={e => onUpdate(cfg.id, { apiKey: e.target.value })} className="input-field !py-1 text-[10px]" /></div>
+          <div><label className="text-[9px] text-forge-text2 block mb-0.5">Max Tokens</label><input type="number" value={cfg.maxTokens} onChange={e => onUpdate(cfg.id, { maxTokens: Number(e.target.value) || 1048576 })} className="input-field !py-1 text-[10px]" /></div>
         </div>
       )}
     </div>

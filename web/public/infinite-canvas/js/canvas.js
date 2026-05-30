@@ -31,6 +31,103 @@ window.addEventListener('message', event => {
         });
         if(canvas) syncRemoteCanvasNow();
     }
+    // ── VF Integration: postMessage bridge ──
+    if(event.data?.type === 'studio-theme'){
+        applyTheme(event.data.theme === 'dark' ? 'dark' : 'light');
+    }
+    if(event.data?.type === 'vf-ping'){
+        // Respond to parent VF ping with readiness signal
+        try { window.parent.postMessage({type:'canvas-ready'}, '*'); } catch(e){}
+    }
+    if(event.data?.type === 'vf-load-workflow'){
+        // Receive a workflow detail from VF and load its nodes into the canvas
+        const wf = event.data.data;
+        if(wf && wf.nodes && wf.nodes.length){
+            console.log('[Canvas] Loading workflow from VF:', wf.name, '- nodes:', wf.nodes.length);
+            // Assign fresh IDs and build ID mapping for connections
+            const idMap = {};
+            nodes = wf.nodes.map(n => {
+                const newId = uid(n.type || 'n');
+                idMap[n.id] = newId;
+                return Object.assign({}, n, { id: newId });
+            });
+            connections = (wf.connections || []).map(c => ({
+                id: uid('c'),
+                from: idMap[c.from] || c.from,
+                to: idMap[c.to] || c.to,
+            }));
+            canvas = canvas || {};
+            canvas.title = wf.name || 'Imported Workflow';
+            canvas.nodes = nodes;
+            canvas.connections = connections;
+            setCanvasMode(true);
+            render();
+            setStatus('✅ 已加载: ' + (wf.name || ''));
+        } else {
+            console.warn('[Canvas] Received workflow with no nodes:', wf?.name);
+        }
+    }
+    if(event.data?.type === 'vf-load-workflows'){
+        // Receive workflow list from VF (for reference)
+        const wfs = event.data.data;
+        if(Array.isArray(wfs)){
+            console.log('[Canvas] Received', wfs.length, 'workflows from VF');
+        }
+    }
+    if(event.data?.type === 'vf-open-preset'){
+        // Load a preset workflow as a new canvas
+        const preset = event.data.data;
+        if(preset && preset.canvas_nodes && preset.canvas_nodes.length){
+            console.log('[Canvas] Opening preset:', preset.name);
+            const idMap = {};
+            nodes = preset.canvas_nodes.map(n => {
+                const newId = uid(n.type || 'n');
+                idMap[n.id] = newId;
+                return Object.assign({}, n, { id: newId });
+            });
+            connections = (preset.canvas_connections || []).map(c => ({
+                id: uid('c'),
+                from: idMap[c.from] || c.from,
+                to: idMap[c.to] || c.to,
+            }));
+            canvas = {
+                id: uid('canvas'),
+                title: preset.name || 'Preset',
+                nodes: nodes,
+                connections: connections,
+                viewport: {x:0, y:0, scale:1},
+                kind: 'classic',
+                logs: [],
+            };
+            setCanvasMode(true);
+            render();
+            setStatus('✅ 已加载预设: ' + (preset.name || ''));
+        }
+    }
+    if(event.data?.type === 'vf-save-result'){
+        // Handle save result from VF backend
+        const result = event.data.data;
+        if(result?.ok){
+            setStatus('✅ 已保存到 VF: ' + (result.name || ''));
+        } else {
+            console.warn('[Canvas] VF save failed:', result?.error);
+        }
+    }
+    if(event.data?.type === 'vf-task-submitted'){
+        // VF confirms a pipeline task was submitted
+        const data = event.data.data;
+        console.log('[Canvas] VF task submitted:', data?.task_id);
+    }
+    if(event.data?.type === 'vf-task-complete'){
+        // VF reports a pipeline task completed
+        const task = event.data.data;
+        console.log('[Canvas] VF task complete:', task?.task_id, task?.status);
+    }
+    if(event.data?.type === 'vf-task-error'){
+        // VF reports a pipeline task error
+        const err = event.data.data;
+        console.warn('[Canvas] VF task error:', err?.error);
+    }
 });
 window.addEventListener('studio-lang-change', () => {
     document.title = tr('canvas.title');
@@ -10385,4 +10482,36 @@ window.onload = async () => {
     pruneMissingComfyWorkflows();
     await loadCanvasList(false);
     setCanvasMode(false);
+    // Signal to parent VF that canvas is ready
+    try { window.parent.postMessage({type:'canvas-ready'}, '*'); } catch(e){}
 };
+
+// ── 流水线模板保存 ──
+async function saveAsPipelineTemplate(){
+    if(!canvas || !nodes.length){ alert('请先添加节点'); return; }
+    try {
+        const payload = {
+            name: canvas.title || '未命名流水线',
+            nodes: serializableCanvasNodes(),
+            connections: connections,
+        };
+        // Notify parent VF window via postMessage (iframe bridge)
+        try {
+            window.parent.postMessage({type:'save-workflow', data: payload}, '*');
+        } catch(e){ /* not in iframe or no parent */ }
+
+        const res = await fetch('/api/vf/workflows/save', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if(data.ok){
+            alert('✅ 流水线模板已保存: ' + data.name + '\n启用阶段: ' + (data.enabled_stages||[]).join(' → '));
+        } else {
+            alert('保存失败: ' + JSON.stringify(data));
+        }
+    } catch(e){
+        alert('保存失败: ' + e.message);
+    }
+}

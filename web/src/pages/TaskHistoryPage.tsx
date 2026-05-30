@@ -1,7 +1,8 @@
 import { useState, useMemo } from 'react';
-import { History, Clock, CheckCircle, XCircle, AlertTriangle, Loader2, Trash2, ChevronDown, ChevronUp, Image, Cpu, FileText, Hash, Calendar, Search, Download, Archive, Layers, ZoomIn } from 'lucide-react';
+import { History, Clock, CheckCircle, XCircle, AlertTriangle, Loader2, Trash2, ChevronDown, ChevronUp, Image, Cpu, FileText, Hash, Calendar, Search, Download, Archive, Layers, ZoomIn, StopCircle, Shield } from 'lucide-react';
 import { useTaskHistoryStore, type TaskRecord } from '@/store/useTaskHistoryStore';
 import { ImageCompareModal, type CompareImage } from '@/components/ImageCompareModal';
+import { abortTask, isTaskRunning } from '@/services/abortRegistry';
 
 type FilterStatus = 'all' | 'completed' | 'failed' | 'partial' | 'generating';
 
@@ -24,17 +25,25 @@ async function downloadImage(url: string, filename: string) {
   } catch { window.open(url, '_blank'); }
 }
 
+/** 生成按SKU命名的下载文件名 */
+function skuFilename(task: TaskRecord, index: number): string {
+  const sku = task.skuCode || task.productName || 'img';
+  const type = task.type === 'tryon' ? '主图' : task.type === 'detail' ? '详情' : '通用';
+  return `${sku}_${type}_${index + 1}.png`.replace(/[\\/:*?"<>|]/g, '_');
+}
+
 async function downloadAll(task: TaskRecord) {
   for (let i = 0; i < task.resultUrls.length; i++) {
-    await downloadImage(task.resultUrls[i], `vf-${task.type}-${task.skuCode || 'img'}-${i + 1}.png`);
+    await downloadImage(task.resultUrls[i], skuFilename(task, i));
   }
 }
 
 async function batchDownload(tasks: TaskRecord[]) {
-  const urls = tasks.flatMap(t => t.resultUrls);
-  if (urls.length === 0) return;
-  for (let i = 0; i < urls.length; i++) {
-    await downloadImage(urls[i], `vf-batch-${i + 1}.png`);
+  if (tasks.length === 0) return;
+  for (const task of tasks) {
+    for (let i = 0; i < task.resultUrls.length; i++) {
+      await downloadImage(task.resultUrls[i], skuFilename(task, i));
+    }
   }
 }
 
@@ -286,6 +295,12 @@ function TaskCard({ task, expanded, selected, onToggle, onSelect, onDelete, onCo
           {isGen && (
             <div className="w-20 text-right"><div className="h-1.5 rounded-full bg-forge-surface2 overflow-hidden"><div className="h-full bg-gradient-to-r from-forge-cyan to-forge-orange transition-all" style={{ width: `${task.progress}%` }} /></div><p className="text-[10px] text-forge-text2 mt-1">{task.progress}%</p></div>
           )}
+          {isGen && (
+            <button onClick={(e) => { e.stopPropagation(); abortTask(task.id); }}
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-forge-red hover:bg-forge-red/10 border border-forge-red/20 transition-colors" title="终止任务">
+              <StopCircle size={12} />终止
+            </button>
+          )}
           {task.resultUrls.length > 0 && (
             <button onClick={(e) => { e.stopPropagation(); onDownloadAll(task); }} disabled={downloadingId !== null} className="flex items-center gap-1 px-2 py-1 rounded text-xs text-forge-cyan hover:bg-forge-cyan/10 transition-colors disabled:opacity-50" title="下载全部结果">
               {downloadingId === task.id ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}下载
@@ -317,6 +332,11 @@ function TaskCard({ task, expanded, selected, onToggle, onSelect, onDelete, onCo
           {task.error && (
             <div><p className="text-[10px] text-forge-red/70 mb-1">错误信息</p><pre className="p-2 rounded bg-forge-red/5 border border-forge-red/20 text-[10px] text-forge-red font-mono whitespace-pre-wrap max-h-24 overflow-y-auto">{task.error}</pre></div>
           )}
+          {task.validationReport && (
+            <div><p className="text-[10px] text-forge-text2/60 mb-1 flex items-center gap-1"><Shield size={10} />Mimo 自动校验报告</p>
+              <pre className={`p-2 rounded border text-[10px] font-mono whitespace-pre-wrap max-h-24 overflow-y-auto ${task.validationReport.includes('不通过') ? 'bg-forge-red/5 border-forge-red/20 text-forge-red' : 'bg-forge-green/5 border-forge-green/20 text-forge-green'}`}>{task.validationReport}</pre>
+            </div>
+          )}
           {task.resultUrls.length > 0 && (
             <div>
               <div className="flex items-center justify-between mb-2">
@@ -335,7 +355,7 @@ function TaskCard({ task, expanded, selected, onToggle, onSelect, onDelete, onCo
                       </div>
                     </div>
                     <button
-                      onClick={(e) => { e.stopPropagation(); onDownloadSingle(url, `vf-${task.type}-${task.skuCode || 'img'}-${i + 1}.png`); }}
+                      onClick={(e) => { e.stopPropagation(); onDownloadSingle(url, skuFilename(task, i)); }}
                       disabled={downloadingId !== null}
                       className="absolute top-1.5 right-1.5 p-1.5 rounded bg-black/60 text-white hover:bg-forge-cyan transition-colors disabled:opacity-50"
                       title="下载此图"

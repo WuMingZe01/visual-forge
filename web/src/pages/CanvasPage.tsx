@@ -54,8 +54,8 @@ export function CanvasPage() {
     let ok = 0;
     let fail = 0;
 
-    // Kimi analysis
-    addToast('info', 'Kimi 分析中...');
+    // AI analysis
+    addToast('info', 'AI 分析中...');
     let invariant = '';
     let garment = '';
     try {
@@ -67,7 +67,7 @@ export function CanvasPage() {
       const { analyzeBothImages, analyzeModelImage } = await import('@/services/llmService');
       const { useLlmStore } = await import('@/store/useLlmStore');
       const visionModel = useLlmStore.getState().getVisionModel();
-      if (!visionModel) { addToast('error', '请先配置 Kimi 多模态模型'); setIsGenerating(false); return; }
+      if (!visionModel) { addToast('error', '请先配置 AI 多模态模型'); setIsGenerating(false); return; }
 
       if (modelB64) {
         const result = await analyzeBothImages(visionModel, modelB64, productB64_llm);
@@ -78,7 +78,7 @@ export function CanvasPage() {
         invariant = await analyzeModelImage(visionModel, productB64_llm);
       }
     } catch (e) {
-      addToast('warning', 'Kimi 分析失败，使用通用模板');
+      addToast('warning', 'AI分析失败，使用通用模板');
     }
 
     // Generate each module

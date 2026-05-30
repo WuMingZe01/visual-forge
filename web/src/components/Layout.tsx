@@ -1,17 +1,19 @@
 import { useState, type ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
-import { Package, Shirt, LayoutTemplate, Settings, Menu, X, Image, History, PaintBucket, LibraryBig, Layers, Users, BookTemplate } from 'lucide-react';
+import { Package, Shirt, LayoutTemplate, Settings, Menu, X, Image, History, PaintBucket, LibraryBig, Layers, Users, BookTemplate, Shuffle, ImageIcon, PenTool, Zap } from 'lucide-react';
 import { useThemeStore, THEMES } from '@/store/useThemeStore';
 
 const navItems = [
   { to: '/', label: '主图生成', icon: Shirt },
+  { to: '/workflow', label: '工作流执行', icon: Zap },
   { to: '/batch', label: '批量工单', icon: Layers },
-  { to: '/canvas', label: '详情页', icon: LayoutTemplate },
-  { to: '/pose', label: '姿势裂变', icon: Shirt },
-  { to: '/detail-gen', label: '详情生成', icon: LayoutTemplate },
+  { to: '/pose', label: '姿势裂变', icon: Shuffle },
+  { to: '/detail-gen', label: '详情页', icon: LayoutTemplate },
   { to: '/models', label: '模特库', icon: Users },
   { to: '/templates', label: '模板库', icon: BookTemplate },
   { to: '/styles', label: '款式管理', icon: Package },
+  { to: '/whitebg', label: '白底图工具', icon: ImageIcon },
+  { to: '/infinite-canvas', label: '无限画布', icon: PenTool },
   { to: '/history', label: '任务历史', icon: History },
   { to: '/settings', label: '系统设置', icon: Settings },
 ];

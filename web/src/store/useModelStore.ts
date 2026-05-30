@@ -54,7 +54,7 @@ export const useModelStore = create<ModelState>()(
         set((s) => ({ models: s.models.filter((m) => m.id !== id) })),
 
       getByCategory: (cat) =>
-        get().models.filter((m) => m.category === cat || m.category === 'both'),
+        get().models.filter((m) => m.category === cat || m.category === 'both' || m.category === 'general'),
     }),
     { name: 'vf-model-store' }
   )

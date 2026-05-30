@@ -48,3 +48,25 @@ desktop.ini
 
 # 调试
 *.log
+
+# 测试脚本（含临时密钥，禁止提交）
+auto_test.py
+test_*.py
+full_test*.py
+final_pipeline.py
+hybrid_test.py
+img2img_pipeline.py
+pipeline_test.py
+run_final_test.py
+generate_final_report.py
+generate_report.py
+
+# 测试数据
+web/public/test-images/
+test_pipeline.py
+
+# 测试图片和参考文档（体积大，不提交）
+测试图片/
+参考文档/
+启动.bat
+test_pipeline.py

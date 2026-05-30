@@ -3648,7 +3648,18 @@ def upstream_message_from_record(item):
 
 @app.get("/")
 async def index():
-    return static_html_response("index.html")
+    """API 状态页 — 前端请访问 http://192.168.11.77:5174"""
+    return {
+        "service": "Visual Forge API Server",
+        "version": APP_VERSION,
+        "frontend": "http://192.168.11.77:5174",
+        "endpoints": {
+            "pipelines": "/api/vf/pipelines",
+            "workflows": "/api/workflows",
+            "generate": "/generate",
+            "health": "/api/vf/pipelines",
+        }
+    }
 
 @app.get("/api/view")
 def view_image(filename: str, type: str = "input", subfolder: str = ""):
@@ -4416,19 +4427,26 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
-    task_id = f"canvas_img_{uuid.uuid4().hex}"
-    with CANVAS_TASK_LOCK:
-        CANVAS_TASKS[task_id] = {
-            "id": task_id,
-            "type": "online-image",
-            "status": "queued",
-            "created_at": time.time(),
-            "updated_at": time.time(),
-            "result": None,
-            "error": "",
-        }
-    asyncio.create_task(run_canvas_image_task(task_id, payload))
-    return {"task_id": task_id, "status": "queued"}
+    try:
+        task_id = f"canvas_img_{uuid.uuid4().hex}"
+        with CANVAS_TASK_LOCK:
+            CANVAS_TASKS[task_id] = {
+                "id": task_id,
+                "type": "online-image",
+                "status": "queued",
+                "created_at": time.time(),
+                "updated_at": time.time(),
+                "result": None,
+                "error": "",
+            }
+        asyncio.create_task(run_canvas_image_task(task_id, payload))
+        return {"task_id": task_id, "status": "queued"}
+    except Exception as exc:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(exc), "detail": "创建画布图片任务失败"}
+        )
 
 @app.get("/api/canvas-image-tasks/{task_id}")
 async def get_canvas_image_task(task_id: str):
@@ -6543,6 +6561,616 @@ def run_workflow(name: str, payload: WorkflowRunRequest):
         client_id=payload.client_id or str(uuid.uuid4()),
     )
     return generate(req)
+
+
+# ============================================================================
+# Visual Forge Pipeline API — 生图流水线引擎
+# ============================================================================
+
+import sys as _sys
+_workflow_engine_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server")
+if _workflow_engine_path not in _sys.path:
+    _sys.path.insert(0, _workflow_engine_path)
+
+from workflow_engine.presets import WORKFLOW_PRESETS
+from workflow_engine.executor import get_executor, TaskStatus, WorkflowTask
+
+
+@app.get("/api/vf/pipelines")
+def list_pipelines():
+    """列出所有可用的生图流水线模板"""
+    return {
+        "pipelines": [
+            {
+                "name": name,
+                "description": preset.get("description", ""),
+                "stage_count": len(preset.get("stages", [])),
+                "enabled_stages": [
+                    s["id"] for s in preset.get("stages", []) if s.get("enabled")
+                ],
+            }
+            for name, preset in WORKFLOW_PRESETS.items()
+        ]
+    }
+
+
+class PipelineRunRequest(BaseModel):
+    pipeline_name: str = "主图批量生成"
+    rows: list = []
+    model_id: str = "gpt-image-2-vip"
+    width: int = 2448
+    height: int = 3264
+    has_lingmao_data: bool = False
+    use_hybrid: bool = True
+
+    model_config = {"extra": "allow", "arbitrary_types_allowed": True}
+
+
+@app.post("/api/vf/pipelines/run")
+async def run_pipeline(request: Request):
+    """提交一个流水线任务"""
+    from workflow_engine.types import PipelineContext
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的 JSON 请求体")
+
+    pipeline_name = body.get("pipeline_name", "主图批量生成")
+    rows = body.get("rows", [])
+    model_id = body.get("model_id", "gpt-image-2-vip")
+    width = body.get("width", 2448)
+    height = body.get("height", 3264)
+
+    preset = WORKFLOW_PRESETS.get(pipeline_name)
+    if not preset:
+        for k, v in WORKFLOW_PRESETS.items():
+            if v.get("name") == pipeline_name:
+                preset = v
+                break
+    if not preset:
+        raise HTTPException(status_code=404, detail=f"流水线不存在: {pipeline_name}")
+
+    ctx = PipelineContext(
+        rows=rows,
+        model_id=model_id,
+        width=width,
+        height=height,
+        has_lingmao_data=body.get("has_lingmao_data", False),
+        use_hybrid=body.get("use_hybrid", True),
+    )
+
+    # Convert preset dict to WorkflowConfig
+    from workflow_engine.types import WorkflowConfig, StageConfig, WorkflowOptions
+    wf_stages = [StageConfig(id=s["id"], enabled=s.get("enabled", True), config=s.get("config")) for s in preset.get("stages", [])]
+    opts = preset.get("options", {})
+    wf_options = WorkflowOptions(
+        generate_concurrency=opts.get("generateConcurrency", 4),
+        generate_timeout_ms=opts.get("generateTimeoutMs", 300000),
+        validate_timeout_ms=opts.get("validateTimeoutMs", 30000),
+        llm_max_concurrency=opts.get("llmMaxConcurrency", 4),
+    )
+    wf_config = WorkflowConfig(
+        name=preset.get("name", pipeline_name),
+        description=preset.get("description", ""),
+        stages=wf_stages,
+        options=wf_options,
+    )
+
+    executor = get_executor(max_concurrent=5)
+    task = await executor.submit(pipeline_name, wf_config, ctx)
+
+    return {
+        "task_id": task.task_id,
+        "pipeline_name": pipeline_name,
+        "status": task.status.value,
+        "row_count": len(rows),
+    }
+
+
+@app.get("/api/vf/pipelines/tasks")
+def list_pipeline_tasks(status: str = None):
+    """列出流水线任务状态"""
+    executor = get_executor()
+    filter_status = TaskStatus(status) if status else None
+    tasks = executor.list_tasks(status=filter_status)
+    tasks.sort(key=lambda t: t.created_at, reverse=True)
+    return {
+        "tasks": [t.to_dict() for t in tasks[:50]],
+        "active_count": executor.active_count,
+    }
+
+
+@app.get("/api/vf/pipelines/tasks/{task_id}")
+def get_pipeline_task(task_id: str):
+    """查询单个任务状态"""
+    executor = get_executor()
+    task = executor.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return task.to_dict()
+
+
+@app.websocket("/ws/vf/pipeline/{task_id}")
+async def ws_pipeline_progress(websocket: WebSocket, task_id: str):
+    """WebSocket 实时推送流水线执行进度"""
+    await manager.connect(websocket, f"pipeline_{task_id}")
+    try:
+        executor = get_executor()
+        task = executor.get_task(task_id)
+        if task:
+            await websocket.send_text(json.dumps(task.to_dict()))
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                task = executor.get_task(task_id)
+                if task:
+                    await websocket.send_text(json.dumps(task.to_dict()))
+    except WebSocketDisconnect:
+        await manager.disconnect(websocket, f"pipeline_{task_id}")
+    except Exception:
+        pass
+
+
+# ============================================================================
+# 工作流模板管理（统一入口：预设 + 画布保存的）
+# ============================================================================
+
+def _list_saved_workflows():
+    """扫描 data/workflows/ 目录，返回画布保存的工作流模板列表"""
+    wf_dir = os.path.join(DATA_DIR, "workflows")
+    if not os.path.isdir(wf_dir):
+        return []
+    results = []
+    for fname in sorted(os.listdir(wf_dir)):
+        if not fname.endswith(".json"):
+            continue
+        fpath = os.path.join(wf_dir, fname)
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            canvas_nodes = data.get("source_canvas_nodes", [])
+            canvas_connections = data.get("source_canvas_connections", [])
+            generator_config = _extract_generator_config(canvas_nodes)
+            results.append({
+                "name": data.get("name", fname.replace(".json", "")),
+                "source": "canvas",
+                "description": data.get("description", ""),
+                "stages": data.get("stages", []),
+                "node_count": len(canvas_nodes),
+                "connection_count": len(canvas_connections),
+                "file": fname,
+                "modified_at": int(os.path.getmtime(fpath) * 1000),
+                "generator_config": generator_config,
+                "canvas_nodes": canvas_nodes,
+                "canvas_connections": canvas_connections,
+            })
+        except Exception:
+            continue
+    return results
+
+
+def _get_saved_workflow(name: str):
+    """获取单个画布保存的工作流模板详情"""
+    safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in name)
+    fpath = os.path.join(DATA_DIR, "workflows", f"{safe_name}.json")
+    if not os.path.isfile(fpath):
+        return None
+    with open(fpath, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@app.get("/api/vf/workflows")
+def list_all_workflows():
+    """列出所有工作流模板（预设 + 画布保存的）"""
+    # 预设模板
+    presets = []
+    for key, preset in WORKFLOW_PRESETS.items():
+        presets.append({
+            "name": preset.get("name", key),
+            "source": "preset",
+            "description": preset.get("description", ""),
+            "stages": [{"id": s["id"], "enabled": s.get("enabled", True)} for s in preset.get("stages", [])],
+            "node_count": len(preset.get("canvas_nodes", [])),
+            "connection_count": len(preset.get("canvas_connections", [])),
+            "canvas_nodes": preset.get("canvas_nodes", []),
+            "canvas_connections": preset.get("canvas_connections", []),
+            "generator_config": {},
+        })
+    # 画布保存的模板
+    saved = _list_saved_workflows()
+    return {"workflows": presets + saved}
+
+
+@app.get("/api/vf/workflows/{name}")
+def get_workflow_detail(name: str):
+    """获取工作流模板详情（预设或画布保存的）"""
+    # 先查预设
+    preset = WORKFLOW_PRESETS.get(name)
+    if preset:
+        return {
+            "name": preset.get("name", name),
+            "source": "preset",
+            "description": preset.get("description", ""),
+            "stages": preset.get("stages", []),
+            "options": preset.get("options", {}),
+            "nodes": preset.get("canvas_nodes", []),
+            "connections": preset.get("canvas_connections", []),
+        }
+    # 再查画布保存的
+    data = _get_saved_workflow(name)
+    if data:
+        return {
+            "name": data.get("name", name),
+            "source": "canvas",
+            "description": data.get("description", ""),
+            "stages": data.get("stages", []),
+            "options": data.get("options", {}),
+            "nodes": data.get("source_canvas_nodes", []),
+            "connections": data.get("source_canvas_connections", []),
+        }
+    raise HTTPException(status_code=404, detail=f"工作流不存在: {name}")
+
+
+@app.delete("/api/vf/workflows/{name}")
+def delete_workflow(name: str):
+    """删除画布保存的工作流模板（预设模板不可删除）"""
+    safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in name)
+    fpath = os.path.join(DATA_DIR, "workflows", f"{safe_name}.json")
+    if not os.path.isfile(fpath):
+        raise HTTPException(status_code=404, detail=f"工作流不存在或为预设模板: {name}")
+    os.remove(fpath)
+    return {"ok": True, "deleted": name}
+
+
+class WorkflowRunRequest(BaseModel):
+    """运行工作流模板的请求"""
+    model_id: str = "gpt-image-2-vip"
+    width: int = 2448
+    height: int = 3264
+    use_hybrid: bool = True
+    rows: list = []
+    # 单图模式：直接传图片 URL/base64，自动构造 rows
+    product_image_url: str = ""
+    model_image_url: str = ""
+    style_ref_url: str = ""
+    prompt: str = ""
+    count: int = 1
+
+
+def _extract_generator_config(nodes: list) -> dict:
+    """从画布节点中提取生成器配置（provider、model、size 等）"""
+    for node in nodes:
+        ntype = node.get("type", "")
+        if ntype in ("generator", "msgen", "comfy", "rh"):
+            config = {}
+            if node.get("apiProvider"):
+                config["provider_id"] = node["apiProvider"]
+            if node.get("model"):
+                config["model"] = node["model"]
+            if node.get("msCustomModel"):
+                config["model"] = node["msCustomModel"]
+            if node.get("ratio"):
+                config["ratio"] = node["ratio"]
+            if node.get("resolution"):
+                config["resolution"] = node["resolution"]
+            if node.get("customWidth"):
+                config["width"] = node["customWidth"]
+            if node.get("customHeight"):
+                config["height"] = node["customHeight"]
+            if node.get("count"):
+                config["count"] = node["count"]
+            if node.get("rhMode"):
+                config["rh_mode"] = node["rhMode"]
+            if node.get("webappId"):
+                config["webapp_id"] = node["webappId"]
+            if node.get("workflowId"):
+                config["workflow_id"] = node["workflowId"]
+            return config
+    return {}
+
+
+def _extract_llm_config(nodes: list) -> dict:
+    """从画布节点中提取 LLM 配置"""
+    for node in nodes:
+        if node.get("type") == "llm":
+            config = {}
+            if node.get("model"):
+                config["model"] = node["model"]
+            if node.get("systemPrompt"):
+                config["system_prompt"] = node["systemPrompt"]
+            return config
+    return {}
+
+
+def _extract_prompt_texts(nodes: list, connections: list) -> str:
+    """从画布节点中提取提示词文本（找到连接到生成器的 prompt 节点）"""
+    # 找到生成器节点
+    gen_ids = {n["id"] for n in nodes if n.get("type") in ("generator", "msgen", "comfy", "rh")}
+    # 找到连接到生成器的 prompt 节点
+    prompt_node_ids = set()
+    for conn in connections:
+        if conn.get("to") in gen_ids:
+            prompt_node_ids.add(conn.get("from"))
+    # 收集 prompt 文本
+    texts = []
+    for node in nodes:
+        if node.get("id") in prompt_node_ids and node.get("type") == "prompt":
+            text = node.get("text", "")
+            if text:
+                texts.append(text)
+    return "\n\n".join(texts)
+
+
+@app.post("/api/vf/workflows/{name}/run")
+async def run_workflow_template(name: str, request: Request):
+    """运行指定的工作流模板"""
+    from workflow_engine.types import PipelineContext, WorkflowConfig, StageConfig, WorkflowOptions
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    req = WorkflowRunRequest(**body) if body else WorkflowRunRequest()
+
+    # 查找模板
+    preset = WORKFLOW_PRESETS.get(name)
+    if preset:
+        stages_data = preset.get("stages", [])
+        opts = preset.get("options", {})
+        wf_name = preset.get("name", name)
+        canvas_nodes = []
+        canvas_connections = []
+    else:
+        saved = _get_saved_workflow(name)
+        if not saved:
+            raise HTTPException(status_code=404, detail=f"工作流不存在: {name}")
+        stages_data = saved.get("stages", [])
+        opts = saved.get("options", {})
+        wf_name = saved.get("name", name)
+        canvas_nodes = saved.get("source_canvas_nodes", [])
+        canvas_connections = saved.get("source_canvas_connections", [])
+
+    # 从画布节点中提取生成器配置（provider、model、size）
+    generator_config = _extract_generator_config(canvas_nodes)
+    llm_config = _extract_llm_config(canvas_nodes)
+    prompt_texts = _extract_prompt_texts(canvas_nodes, canvas_connections)
+
+    # 构造 rows：优先用传入的 rows，否则从单图参数构造
+    rows = req.rows
+    if not rows and req.product_image_url:
+        row = {
+            "id": "single_0",
+            "product_image_url": req.product_image_url,
+            "model_image_url": req.model_image_url,
+            "style_ref_url": req.style_ref_url,
+            "prompt": req.prompt or prompt_texts,
+            "count": req.count,
+        }
+        # 注入画布节点的生成器配置
+        if generator_config:
+            row["generator_config"] = generator_config
+        rows = [row]
+    elif rows:
+        # 给每行注入画布配置
+        for row in rows:
+            if generator_config:
+                row.setdefault("generator_config", generator_config)
+            if prompt_texts and not row.get("prompt"):
+                row["prompt"] = prompt_texts
+    if not rows:
+        raise HTTPException(status_code=400, detail="需要提供 rows 或 product_image_url")
+
+    # 构造 WorkflowConfig
+    wf_stages = [StageConfig(id=s["id"], enabled=s.get("enabled", True), config=s.get("config")) for s in stages_data]
+    wf_options = WorkflowOptions(
+        generate_concurrency=opts.get("generateConcurrency", 4),
+        generate_timeout_ms=opts.get("generateTimeoutMs", 480000),
+        validate_timeout_ms=opts.get("validateTimeoutMs", 30000),
+        llm_max_concurrency=opts.get("llmMaxConcurrency", 3),
+    )
+    wf_config = WorkflowConfig(
+        name=wf_name,
+        description=f"从模板 [{wf_name}] 运行",
+        stages=wf_stages,
+        options=wf_options,
+    )
+
+    ctx = PipelineContext(
+        rows=rows,
+        model_id=req.model_id,
+        width=req.width,
+        height=req.height,
+        has_lingmao_data=False,
+        use_hybrid=req.use_hybrid,
+    )
+
+    executor = get_executor(max_concurrent=5)
+    task = await executor.submit(wf_name, wf_config, ctx)
+
+    return {
+        "task_id": task.task_id,
+        "workflow_name": wf_name,
+        "status": task.status.value,
+        "row_count": len(rows),
+        "enabled_stages": [s["id"] for s in stages_data if s.get("enabled", True)],
+    }
+
+
+# ============================================================================
+# 画布流水线模板保存
+# ============================================================================
+
+@app.post("/api/vf/workflows/save")
+async def save_pipeline_template(request: Request):
+    """从画布保存流水线模板"""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的 JSON 请求体")
+
+    name = body.get("name", "未命名流水线").strip()
+    nodes = body.get("nodes", [])
+    connections = body.get("connections", [])
+
+    if not name:
+        raise HTTPException(status_code=400, detail="流水线名称不能为空")
+
+    # Map canvas node types to pipeline stages
+    stage_ids = []
+    for node in nodes:
+        ntype = node.get("type", "")
+        stage = _map_canvas_node_to_stage(ntype)
+        if stage:
+            stage_ids.append(stage)
+
+    # Deduplicate and order
+    stage_order = ["prepare", "analyze", "generate", "validate", "finalize"]
+    enabled_stages = list(dict.fromkeys([s for s in stage_order if s in stage_ids]))
+
+    template = {
+        "name": name,
+        "description": f"从画布导出的流水线模板 ({len(nodes)} 节点)",
+        "stages": [{"id": s, "enabled": True} for s in enabled_stages],
+        "options": {
+            "generateConcurrency": 36,
+            "generateTimeoutMs": 480000,
+            "validateTimeoutMs": 30000,
+            "llmMaxConcurrency": 3,
+        },
+        "source_canvas_nodes": nodes,
+        "source_canvas_connections": connections,
+    }
+
+    # Save to workflows directory
+    safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in name)
+    save_path = os.path.join(DATA_DIR, "workflows", f"{safe_name}.json")
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    with open(save_path, "w", encoding="utf-8") as f:
+        json.dump(template, f, ensure_ascii=False, indent=2)
+
+    return {"ok": True, "name": safe_name, "path": save_path, "enabled_stages": enabled_stages}
+
+
+class CanvasPipelineRunRequest(BaseModel):
+    canvas_id: str = ""
+    nodes: list = []
+    connections: list = []
+    model_id: str = "gpt-image-2-vip"
+    width: int = 1024
+    height: int = 1024
+
+
+@app.post("/api/vf/workflows/run-from-canvas")
+async def run_pipeline_from_canvas(request: Request):
+    """从画布节点直接运行流水线（不需先保存模板）"""
+    from workflow_engine.types import PipelineContext, WorkflowConfig, StageConfig, WorkflowOptions
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="无效的 JSON 请求体")
+
+    nodes = body.get("nodes", [])
+    connections = body.get("connections", [])
+    canvas_id = body.get("canvas_id", "")
+    model_id = body.get("model_id", "gpt-image-2-vip")
+    width = body.get("width", 1024)
+    height = body.get("height", 1024)
+
+    if not nodes:
+        raise HTTPException(status_code=400, detail="画布没有节点")
+
+    # Map canvas nodes to pipeline stages
+    stage_ids = []
+    for node in nodes:
+        ntype = node.get("type", "")
+        stage = _map_canvas_node_to_stage(ntype)
+        if stage:
+            stage_ids.append(stage)
+
+    # Deduplicate and order
+    stage_order = ["prepare", "analyze", "generate", "validate", "finalize"]
+    enabled_stages = list(dict.fromkeys([s for s in stage_order if s in stage_ids]))
+
+    if not enabled_stages:
+        raise HTTPException(status_code=400, detail="画布节点无法映射到任何流水线阶段")
+
+    wf_config = WorkflowConfig(
+        name=f"画布流水线-{canvas_id or 'ad-hoc'}",
+        description=f"从画布直接运行 ({len(nodes)} 节点, 阶段: {' → '.join(enabled_stages)})",
+        stages=[StageConfig(id=s, enabled=True) for s in enabled_stages],
+        options=WorkflowOptions(
+            generate_concurrency=4,
+            generate_timeout_ms=480000,
+            validate_timeout_ms=30000,
+            llm_max_concurrency=3,
+        ),
+    )
+
+    # Build rows from canvas node data (image nodes become row inputs)
+    rows = []
+    image_nodes = [n for n in nodes if n.get("type") == "image"]
+    for img_node in image_nodes:
+        row = {
+            "id": img_node.get("id", ""),
+            "image_url": img_node.get("src", "") or img_node.get("url", ""),
+            "prompt": "",
+        }
+        # Find connected prompt nodes
+        for conn in connections:
+            if conn.get("from") == img_node.get("id"):
+                target = next((n for n in nodes if n.get("id") == conn.get("to")), None)
+                if target and target.get("type") in ("prompt", "llm"):
+                    row["prompt"] = target.get("text", "") or target.get("prompt", "")
+        rows.append(row)
+
+    ctx = PipelineContext(
+        rows=rows,
+        model_id=model_id,
+        width=width,
+        height=height,
+        has_lingmao_data=False,
+        use_hybrid=True,
+    )
+
+    executor = get_executor(max_concurrent=5)
+    task = await executor.submit(f"canvas-{canvas_id or 'ad-hoc'}", wf_config, ctx)
+
+    return {
+        "task_id": task.task_id,
+        "status": task.status.value,
+        "enabled_stages": enabled_stages,
+        "row_count": len(rows),
+    }
+
+
+def _map_canvas_node_to_stage(ntype: str) -> str:
+    """映射画布节点类型到流水线阶段"""
+    mapping = {
+        # 资产输入
+        "image": "prepare",
+        # AI 处理
+        "prompt": "analyze",
+        "llm": "analyze",
+        # 生成
+        "generator": "generate",
+        "msgen": "generate",
+        "msgenerate": "generate",
+        "comfy": "generate",
+        "comfyui": "generate",
+        "rh": "generate",
+        "video": "generate",
+        "ltxDirector": "generate",
+        # 控制流（不映射到阶段）
+        "loop": "",
+        "group": "",
+        # 输出
+        "output": "finalize",
+    }
+    return mapping.get(ntype, "")
+
 
 if __name__ == "__main__":
     import uvicorn

@@ -19,6 +19,8 @@ export interface TaskRecord {
   resultUrls: string[];
   referenceUrls: string[];
   error: string;
+  /** Mimo 自动校验报告 */
+  validationReport?: string;
   createdAt: string;
   completedAt?: string;
   batchId?: string;
