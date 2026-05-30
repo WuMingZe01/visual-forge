@@ -11,8 +11,10 @@
 
 import asyncio
 import json
+import logging
 import os
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,6 +23,8 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from .types import PipelineContext, WorkflowConfig
 from .engine import PipelineEngine
+
+logger = logging.getLogger(__name__)
 
 
 # ── 任务状态 ──
@@ -136,48 +140,40 @@ class WorkflowExecutor:
         async with self._semaphore:
             task.status = TaskStatus.RUNNING
             task.started_at = time.time()
-            
+
             try:
                 engine = PipelineEngine(task.workflow_config, task.context)
                 await engine.run()
-                
-                # Check if all generation nodes failed (W1)
-                GEN_NODE_TYPES = {"generator", "msgen"}
-                all_gen_failed = False
-                gen_nodes_found = False
-                for nid, output in task.context.node_outputs.items():
-                    if nid.startswith("__"):
-                        continue
-                    if output.node_type in GEN_NODE_TYPES:
-                        gen_nodes_found = True
-                        if output.result is not None:
-                            all_gen_failed = False
-                            break
-                if gen_nodes_found:
-                    any_gen_success = any(
-                        output.result is not None
-                        for nid, output in task.context.node_outputs.items()
-                        if not nid.startswith("__") and output.node_type in GEN_NODE_TYPES
-                    )
-                    if not any_gen_success:
-                        all_gen_failed = True
 
-                if all_gen_failed:
-                    task.status = TaskStatus.FAILED
-                    # Collect actual error messages from failed nodes
-                    errors = []
-                    for nid, out in task.context.node_outputs.items():
-                        if nid.startswith("__"):
-                            continue
-                        if out.node_type in GEN_NODE_TYPES and out.error:
-                            errors.append(f"[{nid}] {out.error[:120]}")
-                    task.error = "所有生成节点均失败: " + ("; ".join(errors) if errors else "未知错误")
+                # ── Post-execution: check generator node results ──
+                GEN_NODE_TYPES = {"generator", "msgen"}
+                gen_nodes = [
+                    (nid, out) for nid, out in task.context.node_outputs.items()
+                    if not nid.startswith("__") and out.node_type in GEN_NODE_TYPES
+                ]
+
+                if gen_nodes:
+                    successes = [(nid, out) for nid, out in gen_nodes if out.result is not None]
+                    failures = [(nid, out) for nid, out in gen_nodes if out.result is None]
+
+                    if not successes:
+                        task.status = TaskStatus.FAILED
+                        # Collect detailed error messages from each failed node
+                        error_parts = []
+                        for nid, out in failures:
+                            err = out.error or "未知错误（无详细错误信息）"
+                            error_parts.append(f"[{nid}] {err[:200]}")
+                        if error_parts:
+                            task.error = "所有生成节点均失败 | " + " | ".join(error_parts)
+                        else:
+                            task.error = "所有生成节点均失败: 生成节点无输出且无错误信息"
+                    else:
+                        task.status = TaskStatus.COMPLETED
                 else:
                     task.status = TaskStatus.COMPLETED
-                # Extract results from node_outputs (new architecture)
-                # Also check runtime_template._results for backward compatibility
+
+                # ── Extract results ──
                 results = {}
-                # From node_outputs
                 for nid, output in task.context.node_outputs.items():
                     if nid.startswith("__"):
                         continue
@@ -186,18 +182,22 @@ class WorkflowExecutor:
                             "urls": output.result if isinstance(output.result, list) else [output.result],
                             "error": output.error or "",
                         }
-                # From runtime_template._results (backward compat)
+                # Backward compat
                 tmpl_results = task.context.runtime_template.get("_results", {})
                 for rid, r in tmpl_results.items():
                     if rid not in results:
                         results[rid] = {"urls": r.get("urls", []), "error": r.get("error", "")}
                 task.result = {"row_results": results}
+
             except asyncio.CancelledError:
                 task.status = TaskStatus.CANCELLED
                 task.error = "任务被取消"
+                logger.warning(f"Task {task.task_id} cancelled")
             except Exception as e:
                 task.status = TaskStatus.FAILED
-                task.error = str(e)
+                tb = traceback.format_exc()
+                task.error = f"{type(e).__name__}: {e}\n\nTraceback:\n{tb[-2000:]}"
+                logger.exception(f"Task {task.task_id} ({task.workflow_name}) failed with exception")
             finally:
                 task.completed_at = time.time()
                 # 推送完成通知

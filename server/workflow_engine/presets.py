@@ -55,10 +55,10 @@ MAIN_BATCH_WORKFLOW: dict = {
         "llmMaxConcurrency": 3,
     },
     "canvas_nodes": [
-        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "商品图输入", "url": ""},
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "商品图输入", "url": "{{product_image}}"},
         {"id": "llm1",     "type": "llm",       "x": 400,  "y": 200, "prompt": "分析商品特征和风格", "model": "default", "w": 200, "h": 100},
-        {"id": "prompt1",  "type": "prompt",    "x": 700,  "y": 200, "text": "根据分析结果生成主图提示词"},
-        {"id": "gen1",     "type": "generator", "x": 1000, "y": 200, "apiProvider": "auto", "model": "", "ratio": "1:1 (淘宝主图)", "resolution": "2k", "customRatio": "", "customSize": "", "inputs": []},
+        {"id": "prompt1",  "type": "prompt",    "x": 700,  "y": 200, "text": "{{user_prompt}}"},
+        {"id": "gen1",     "type": "generator", "x": 1000, "y": 200, "apiProvider": "{{api_provider}}", "model": "{{model_id}}", "ratio": "{{aspect_ratio}}", "resolution": "{{resolution}}", "customRatio": "", "customSize": "", "inputs": []},
         {"id": "output1",  "type": "output",    "x": 1300, "y": 200},
     ],
     "canvas_connections": [
@@ -142,9 +142,9 @@ POSE_BATCH_WORKFLOW: dict = {
         "llmMaxConcurrency": 3,
     },
     "canvas_nodes": [
-        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "姿势模板图", "url": ""},
-        {"id": "prompt1",  "type": "prompt",    "x": 400,  "y": 200, "text": "预定义姿势描述提示词"},
-        {"id": "gen1",     "type": "generator", "x": 700,  "y": 200, "apiProvider": "auto", "model": "", "ratio": "3:4 (小红书)", "resolution": "2k", "customRatio": "", "customSize": "", "inputs": []},
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "姿势模板图", "url": "{{template_image}}"},
+        {"id": "prompt1",  "type": "prompt",    "x": 400,  "y": 200, "text": "{{pose_prompt}}"},
+        {"id": "gen1",     "type": "generator", "x": 700,  "y": 200, "apiProvider": "{{api_provider}}", "model": "{{model_id}}", "ratio": "{{aspect_ratio}}", "resolution": "{{resolution}}", "customRatio": "", "customSize": "", "inputs": []},
         {"id": "output1",  "type": "output",    "x": 1000, "y": 200},
     ],
     "canvas_connections": [
@@ -227,13 +227,15 @@ DETAIL_BATCH_WORKFLOW: dict = {
         "llmMaxConcurrency": 3,
     },
     "canvas_nodes": [
-        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "详情模板参考图", "url": ""},
-        {"id": "gen1",     "type": "generator", "x": 400,  "y": 200, "apiProvider": "auto", "model": "", "ratio": "3:4 (小红书)", "resolution": "2k", "customRatio": "", "customSize": "", "inputs": []},
-        {"id": "output1",  "type": "output",    "x": 700,  "y": 200},
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "详情模板参考图", "url": "{{detail_image}}"},
+        {"id": "prompt1",  "type": "prompt",    "x": 300,  "y": 200, "text": "{{user_prompt}}"},
+        {"id": "gen1",     "type": "generator", "x": 500,  "y": 200, "apiProvider": "{{api_provider}}", "model": "{{model_id}}", "ratio": "{{aspect_ratio}}", "resolution": "{{resolution}}", "customRatio": "", "customSize": "", "inputs": []},
+        {"id": "output1",  "type": "output",    "x": 800,  "y": 200},
     ],
     "canvas_connections": [
-        {"id": "c1", "from": "image1", "to": "gen1"},
-        {"id": "c2", "from": "gen1",   "to": "output1"},
+        {"id": "c1", "from": "image1", "to": "prompt1"},
+        {"id": "c2", "from": "prompt1", "to": "gen1"},
+        {"id": "c3", "from": "gen1",   "to": "output1"},
     ],
     "exposed_mapping": {
         "detail_image": {
@@ -242,6 +244,14 @@ DETAIL_BATCH_WORKFLOW: dict = {
             "label": "详情模板图",
             "type": "image",
             "required": True,
+        },
+        "user_prompt": {
+            "node_id": "prompt1",
+            "path": ["text"],
+            "label": "提示词",
+            "type": "text",
+            "required": False,
+            "default": "详情页模块图，高清",
         },
         "api_provider": {
             "node_id": "gen1",
@@ -302,9 +312,9 @@ QUICK_GENERATE_WORKFLOW: dict = {
         "llmMaxConcurrency": 1,
     },
     "canvas_nodes": [
-        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "参考图", "url": ""},
-        {"id": "prompt1",  "type": "prompt",    "x": 400,  "y": 200, "text": "输入生图提示词"},
-        {"id": "gen1",     "type": "generator", "x": 700,  "y": 200, "apiProvider": "auto", "model": "", "ratio": "1:1 (淘宝主图)", "resolution": "2k", "customRatio": "", "customSize": "", "inputs": []},
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "参考图", "url": "{{ref_image}}"},
+        {"id": "prompt1",  "type": "prompt",    "x": 400,  "y": 200, "text": "{{user_prompt}}"},
+        {"id": "gen1",     "type": "generator", "x": 700,  "y": 200, "apiProvider": "{{api_provider}}", "model": "{{model_id}}", "ratio": "{{aspect_ratio}}", "resolution": "{{resolution}}", "customRatio": "", "customSize": "", "inputs": []},
         {"id": "output1",  "type": "output",    "x": 1000, "y": 200},
     ],
     "canvas_connections": [
@@ -388,12 +398,12 @@ PIPELINE_FULL_WORKFLOW: dict = {
         "llmMaxConcurrency": 3,
     },
     "canvas_nodes": [
-        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "商品图输入", "url": ""},
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "商品图输入", "url": "{{product_image}}"},
         {"id": "llm1",     "type": "llm",       "x": 400,  "y": 200, "prompt": "分析商品特征", "model": "default", "w": 200, "h": 100},
-        {"id": "prompt1",  "type": "prompt",    "x": 700,  "y": 200, "text": "主图提示词"},
-        {"id": "gen1",     "type": "generator", "x": 1000, "y": 100, "apiProvider": "auto", "model": "", "ratio": "1:1 (淘宝主图)",   "resolution": "2k", "customRatio": "", "customSize": "", "inputs": []},
-        {"id": "gen2",     "type": "generator", "x": 1000, "y": 300, "apiProvider": "auto", "model": "", "ratio": "3:4 (小红书)", "resolution": "2k", "customRatio": "", "customSize": "", "inputs": []},
-        {"id": "gen3",     "type": "generator", "x": 1300, "y": 200, "apiProvider": "auto", "model": "", "ratio": "3:4 (小红书)", "resolution": "2k", "customRatio": "", "customSize": "", "inputs": []},
+        {"id": "prompt1",  "type": "prompt",    "x": 700,  "y": 200, "text": "{{user_prompt}}"},
+        {"id": "gen1",     "type": "generator", "x": 1000, "y": 100, "apiProvider": "{{api_provider}}", "model": "{{model_id}}", "ratio": "{{aspect_ratio}}",   "resolution": "{{resolution}}", "customRatio": "", "customSize": "", "inputs": []},
+        {"id": "gen2",     "type": "generator", "x": 1000, "y": 300, "apiProvider": "{{api_provider}}", "model": "{{model_id}}", "ratio": "3:4 (小红书)", "resolution": "{{resolution}}", "customRatio": "", "customSize": "", "inputs": []},
+        {"id": "gen3",     "type": "generator", "x": 1300, "y": 200, "apiProvider": "{{api_provider}}", "model": "{{model_id}}", "ratio": "3:4 (小红书)", "resolution": "{{resolution}}", "customRatio": "", "customSize": "", "inputs": []},
         {"id": "output1",  "type": "output",    "x": 1600, "y": 200},
     ],
     "canvas_connections": [
@@ -480,13 +490,15 @@ SIMPLE_BATCH_WORKFLOW: dict = {
         "llmMaxConcurrency": 0,
     },
     "canvas_nodes": [
-        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "输入图片", "url": ""},
-        {"id": "gen1",     "type": "generator", "x": 400,  "y": 200, "apiProvider": "auto", "model": "", "ratio": "1:1 (淘宝主图)", "resolution": "1k", "customRatio": "", "customSize": "", "inputs": []},
-        {"id": "output1",  "type": "output",    "x": 700,  "y": 200},
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "输入图片", "url": "{{ref_image}}"},
+        {"id": "prompt1",  "type": "prompt",    "x": 350,  "y": 200, "text": "{{user_prompt}}"},
+        {"id": "gen1",     "type": "generator", "x": 600,  "y": 200, "apiProvider": "{{api_provider}}", "model": "{{model_id}}", "ratio": "{{aspect_ratio}}", "resolution": "{{resolution}}", "customRatio": "", "customSize": "", "inputs": []},
+        {"id": "output1",  "type": "output",    "x": 900,  "y": 200},
     ],
     "canvas_connections": [
-        {"id": "c1", "from": "image1", "to": "gen1"},
-        {"id": "c2", "from": "gen1",   "to": "output1"},
+        {"id": "c1", "from": "image1",  "to": "prompt1"},
+        {"id": "c2", "from": "prompt1", "to": "gen1"},
+        {"id": "c3", "from": "gen1",    "to": "output1"},
     ],
     "exposed_mapping": {
         "ref_image": {
@@ -495,6 +507,14 @@ SIMPLE_BATCH_WORKFLOW: dict = {
             "label": "输入图片",
             "type": "image",
             "required": True,
+        },
+        "user_prompt": {
+            "node_id": "prompt1",
+            "path": ["text"],
+            "label": "提示词",
+            "type": "text",
+            "required": False,
+            "default": "专业商品摄影，白色背景，工作室灯光，高清8K",
         },
         "api_provider": {
             "node_id": "gen1",

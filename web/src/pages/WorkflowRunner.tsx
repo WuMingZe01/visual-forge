@@ -75,7 +75,10 @@ export function WorkflowRunner() {
         setWorkflows(list);
         if (list.length > 0 && !selected) setSelected(list[0]);
       })
-      .catch(e => setError(e.message))
+      .catch(e => {
+        console.error('[VF] Failed to load workflows:', e);
+        setError(e.message);
+      })
       .finally(() => setLoading(false));
   }, [setWorkflows, selected]);
 
@@ -136,14 +139,29 @@ export function WorkflowRunner() {
           setActiveStageIdx(idx >= 0 ? idx : 0);
         }
 
-        if (task.status === 'completed' || task.status === 'failed') {
+        if (task.status === 'completed') {
           clearInterval(pollRef.current);
           pollRef.current = null;
           setRunning(false);
           setActiveStageIdx(-1);
           refreshTasks();
+          console.log(`[VF] Task ${taskId} completed in ${task.duration_seconds?.toFixed(1)}s`);
         }
-      } catch { /* keep polling */ }
+
+        if (task.status === 'failed') {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+          setRunning(false);
+          setActiveStageIdx(-1);
+          refreshTasks();
+          const errMsg = task.error || '(no error details)';
+          console.error(`[VF] Task ${taskId} FAILED:`, errMsg);
+          console.error('[VF] Full task data:', JSON.stringify(task, null, 2));
+          setError(errMsg);
+        }
+      } catch (e: any) {
+        console.error('[VF] Poll error:', e);
+      }
     }, 2000);
   }, [refreshTasks]);
 
@@ -165,6 +183,9 @@ export function WorkflowRunner() {
     setCurrentTask(null);
     setActiveStageIdx(0);
 
+    console.log('[VF] Submitting workflow:', selected.name);
+    console.log('[VF] Dynamic inputs:', JSON.stringify(formData, null, 2));
+
     try {
       const res = await fetch(`${API}/api/vf/workflows/execute`, {
         method: 'POST',
@@ -175,7 +196,13 @@ export function WorkflowRunner() {
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || '运行失败');
+      if (!res.ok) {
+        const detail = data.detail || '运行失败';
+        console.error(`[VF] Execute API error ${res.status}:`, detail);
+        throw new Error(detail);
+      }
+
+      console.log('[VF] Task created:', data.task_id);
 
       setCurrentTask({
         task_id: data.task_id,
@@ -186,6 +213,7 @@ export function WorkflowRunner() {
       });
       pollTask(data.task_id);
     } catch (e: any) {
+      console.error('[VF] Execute failed:', e);
       setError(e.message);
       setRunning(false);
       setActiveStageIdx(-1);
@@ -245,9 +273,10 @@ export function WorkflowRunner() {
       </div>
 
       {error && (
-        <div className="glass-card p-3 border-red-500/30 bg-red-500/5 text-red-400 text-sm flex items-center gap-2">
-          <AlertCircle size={14} /> {error}
-          <button onClick={() => setError('')} className="ml-auto"><X size={14} /></button>
+        <div className="glass-card p-3 border-red-500/30 bg-red-500/5 text-red-400 text-sm flex items-start gap-2">
+          <AlertCircle size={14} className="shrink-0 mt-0.5" />
+          <pre className="flex-1 whitespace-pre-wrap text-xs leading-relaxed max-h-32 overflow-y-auto">{error}</pre>
+          <button onClick={() => setError('')} className="shrink-0"><X size={14} /></button>
         </div>
       )}
 
@@ -432,7 +461,12 @@ export function WorkflowRunner() {
               )}
 
               {currentTask.error && (
-                <div className="text-red-400 text-xs bg-red-500/5 rounded p-2">{currentTask.error}</div>
+                <div className="text-red-400 text-xs bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle size={14} className="shrink-0 mt-0.5 text-red-400" />
+                    <pre className="flex-1 whitespace-pre-wrap text-xs leading-relaxed max-h-48 overflow-y-auto">{currentTask.error}</pre>
+                  </div>
+                </div>
               )}
 
               {currentTask.duration_seconds != null && (

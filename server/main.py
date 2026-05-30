@@ -6894,7 +6894,7 @@ async def execute_workflow_unified(request: Request):
     try:
         runtime = inject_parameters(template, dynamic_inputs)
     except InjectionError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"参数注入失败: {e}")
 
     # 构建 WorkflowConfig
     stages_data = template.get("stages", [])
@@ -6917,8 +6917,13 @@ async def execute_workflow_unified(request: Request):
     )
 
     # 提交执行
-    executor = get_executor()
-    task = await executor.submit(config.name, config, ctx)
+    try:
+        executor = get_executor()
+        task = await executor.submit(config.name, config, ctx)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail=f"工作流提交失败: {e}\n{tb[-1000:]}")
 
     return {
         "task_id": task.task_id,
@@ -6996,8 +7001,13 @@ async def run_workflow_template(name: str, request: Request):
         validate_timeout_ms=opts.get("validateTimeoutMs", 30000),
     )
 
-    executor = get_executor(max_concurrent=5)
-    task = await executor.submit(config.name, config, ctx)
+    try:
+        executor = get_executor(max_concurrent=5)
+        task = await executor.submit(config.name, config, ctx)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail=f"工作流提交失败: {e}\n{tb[-1000:]}")
 
     return {
         "task_id": task.task_id,
