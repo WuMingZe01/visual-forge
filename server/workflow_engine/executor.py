@@ -126,12 +126,24 @@ class WorkflowExecutor:
                 await engine.run()
                 
                 task.status = TaskStatus.COMPLETED
-                task.result = {
-                    "row_results": {
-                        rid: {"urls": r.get("urls", []), "error": r.get("error", "")}
-                        for rid, r in task.context.row_results.items()
-                    }
-                }
+                # Extract results from node_outputs (new architecture)
+                # Also check runtime_template._results for backward compatibility
+                results = {}
+                # From node_outputs
+                for nid, output in task.context.node_outputs.items():
+                    if nid.startswith("__"):
+                        continue
+                    if output.result is not None:
+                        results[nid] = {
+                            "urls": output.result if isinstance(output.result, list) else [output.result],
+                            "error": output.error or "",
+                        }
+                # From runtime_template._results (backward compat)
+                tmpl_results = task.context.runtime_template.get("_results", {})
+                for rid, r in tmpl_results.items():
+                    if rid not in results:
+                        results[rid] = {"urls": r.get("urls", []), "error": r.get("error", "")}
+                task.result = {"row_results": results}
             except asyncio.CancelledError:
                 task.status = TaskStatus.CANCELLED
                 task.error = "任务被取消"

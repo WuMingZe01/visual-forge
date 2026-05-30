@@ -6,152 +6,167 @@
 当画布保存为工作流模板时，每个 node.type 对应这里的一个 handler。
 
 分类：
-  asset_*    — 资产输入节点（图片/数据准备）
-  process_*  — 处理节点（AI分析/提示词整合）
-  gen_*      — 生成节点（生图引擎调用）
-  eval_*     — 评估节点（质量校验）
-  transform_*— 变换节点（视角裂变/水印/裁剪/格式转换）
-  output_*   — 输出节点（结果汇总/推送/存储）
+  image     — 图片输入节点
+  prompt    — 提示词节点
+  llm       — LLM 分析节点
+  generator — 生图引擎节点
+  output    — 输出节点
+  loop      — 循环节点
+  group     — 分组节点
 """
 
-from typing import Any, Callable, Coroutine, Dict, Optional
+from __future__ import annotations
 
-# 节点处理函数签名: async (ctx, config) -> Optional[Any]
-NodeHandler = Callable[..., Coroutine[Any, Any, Optional[Any]]]
+from typing import Any, Callable, Coroutine, Optional
 
+from .types import PipelineContext, NodeOutput
 
-def _lazy_import_stage(name: str) -> NodeHandler:
-    """延迟导入，避免循环依赖"""
-    async def handler(ctx, config=None):
-        from .stages import stageRegistry
-        fn = stageRegistry.get(name)
-        if fn:
-            return await fn(ctx, config)
-        raise ValueError(f"未知阶段: {name}")
-    return handler
+# 节点处理函数签名: async (node_dict, ctx) -> NodeOutput
+NodeHandler = Callable[..., Coroutine[Any, Any, Optional[NodeOutput]]]
 
 
-# ── 节点类型映射表 ──
+# ============================================================================
+# Node Execution Helpers
+# ============================================================================
 
-NODE_TYPE_MAP: Dict[str, Dict[str, Any]] = {
-    # ========== 资产输入节点 ==========
-    "asset_product": {
-        "label": "款式白底图",
-        "icon": "📦",
+async def execute_image_node(node: dict, ctx: PipelineContext) -> NodeOutput:
+    """Execute an image input node — just pass through the URL."""
+    url = node.get("url", "")
+    return NodeOutput(node_id=node["id"], node_type="image", result=url)
+
+
+async def execute_prompt_node(node: dict, ctx: PipelineContext) -> NodeOutput:
+    """Execute a prompt node — pass through the text."""
+    text = node.get("text", "")
+    return NodeOutput(node_id=node["id"], node_type="prompt", result=text)
+
+
+async def execute_llm_node(node: dict, ctx: PipelineContext) -> NodeOutput:
+    """Execute an LLM analysis node."""
+    from .providers import get_provider
+
+    provider = get_provider("mimo")
+    # Get upstream image
+    upstream = _get_upstream(node["id"], ctx)
+    prompt = node.get("prompt", "分析图片内容")
+
+    if upstream:
+        result = await provider.analyze(image_url=upstream, prompt=prompt)
+    else:
+        result = prompt
+
+    return NodeOutput(node_id=node["id"], node_type="llm", result=result)
+
+
+async def execute_generator_node(node: dict, ctx: PipelineContext) -> NodeOutput:
+    """Execute a generator node."""
+    from .providers import get_provider
+
+    provider_name = node.get("apiProvider", "auto")
+    provider = get_provider(provider_name)
+
+    # Gather inputs from upstream nodes
+    prompt = ""
+    ref_image = None
+    connections = ctx.runtime_template.get("connections") or ctx.runtime_template.get("canvas_connections") or []
+    for conn in connections:
+        if conn.get("to") == node["id"]:
+            upstream_output = ctx.node_outputs.get(conn["from"])
+            if upstream_output:
+                if upstream_output.node_type == "prompt":
+                    prompt = upstream_output.result or ""
+                elif upstream_output.node_type == "image":
+                    ref_image = upstream_output.result
+                elif upstream_output.node_type == "llm":
+                    if not prompt:
+                        prompt = upstream_output.result or ""
+
+    result = await provider.generate(
+        prompt=prompt,
+        ref_image_url=ref_image,
+        ratio=node.get("ratio", "square"),
+        resolution=node.get("resolution", "2k"),
+    )
+
+    return NodeOutput(
+        node_id=node["id"],
+        node_type="generator",
+        result=result.urls if result.success else None,
+        error=result.error if not result.success else None,
+    )
+
+
+def _get_upstream(node_id: str, ctx: PipelineContext) -> Any:
+    """Get the first upstream output for a node."""
+    connections = ctx.runtime_template.get("connections") or ctx.runtime_template.get("canvas_connections") or []
+    for conn in connections:
+        if conn.get("to") == node_id:
+            upstream = ctx.node_outputs.get(conn["from"])
+            if upstream and upstream.result is not None:
+                return upstream.result
+    return None
+
+
+# ============================================================================
+# Node Type Map
+# ============================================================================
+
+NODE_TYPE_MAP: dict[str, dict[str, Any]] = {
+    "image": {
+        "label": "图片输入",
+        "icon": "🖼",
         "stage": "prepare",
-        "description": "输入商品白底图（正面/反面/细节）",
-        "handler": _lazy_import_stage("prepare"),
+        "description": "输入图片（商品图/模特图/参考图）",
+        "handler": execute_image_node,
     },
-    "asset_model": {
-        "label": "模特参考图",
-        "icon": "🧍",
-        "stage": "prepare",
-        "description": "输入模特参考图（上装/下装/通用/配饰）",
-        "handler": _lazy_import_stage("prepare"),
-    },
-    "asset_template": {
-        "label": "模板参考图",
-        "icon": "📋",
-        "stage": "prepare",
-        "description": "输入模板参考图（主图/姿势裂变/详情页）",
-        "handler": _lazy_import_stage("prepare"),
-    },
-    "asset_detail": {
-        "label": "细节参考图",
-        "icon": "🔍",
-        "stage": "prepare",
-        "description": "输入细节参考图（面料/印花/辅料）",
-        "handler": _lazy_import_stage("prepare"),
-    },
-
-    # ========== AI 处理节点 ==========
-    "llm_analyze_model": {
-        "label": "多模态识别（模特）",
-        "icon": "👁",
+    "prompt": {
+        "label": "提示词",
+        "icon": "📝",
         "stage": "analyze",
-        "description": "MiMo 多模态提取模特不变特征",
-        "handler": _lazy_import_stage("analyze"),
+        "description": "文本提示词输入",
+        "handler": execute_prompt_node,
     },
-    "llm_analyze_product": {
-        "label": "多模态识别（商品）",
-        "icon": "🔬",
+    "llm": {
+        "label": "LLM分析",
+        "icon": "🧠",
         "stage": "analyze",
-        "description": "MiMo 多模态提取商品视觉特征",
-        "handler": _lazy_import_stage("analyze"),
+        "description": "MiMo 多模态视觉分析",
+        "handler": execute_llm_node,
     },
-    "llm_assemble_prompt": {
-        "label": "提示词整合",
-        "icon": "🧩",
-        "stage": "analyze",
-        "description": "DeepSeek 整合不变量+商品资料+卡片描述，输出英文Prompt",
-        "handler": _lazy_import_stage("analyze"),
-    },
-
-    # ========== 生图节点 ==========
-    "image_generate": {
+    "generator": {
         "label": "生图引擎",
         "icon": "🎨",
         "stage": "generate",
         "description": "调用 Yunwu/Grsai 混合引擎生图",
-        "handler": _lazy_import_stage("generate"),
+        "handler": execute_generator_node,
     },
-
-    # ========== 评估节点 ==========
-    "mimo_validate": {
-        "label": "MiMo 质量校验",
-        "icon": "✅",
-        "stage": "validate",
-        "description": "多模态对比生图结果 vs 白底图，评分 1-10",
-        "handler": _lazy_import_stage("validate"),
-    },
-
-    # ========== 变换节点 ==========
-    "view_split": {
-        "label": "视角裂变",
-        "icon": "📐",
-        "stage": "generate",
-        "description": "从主图裂变正面/侧面/45度角等多视角",
-        "handler": _lazy_import_stage("generate"),
-        "config": {
-            "angles": [
-                {"name": "正面", "prompt": "front view, facing camera"},
-                {"name": "侧面", "prompt": "side profile, 90 degree angle"},
-                {"name": "45度角", "prompt": "three-quarter view, 45 degree angle"},
-            ]
-        },
-    },
-    "watermark": {
-        "label": "添加水印",
-        "icon": "💧",
-        "stage": "generate",
-        "description": "给生成的图片添加品牌水印",
-        "handler": _lazy_import_stage("generate"),
-    },
-    "format_convert": {
-        "label": "格式转换",
-        "icon": "🔄",
-        "stage": "generate",
-        "description": "PNG→JPG/WebP 格式转换和质量压缩",
-        "handler": _lazy_import_stage("generate"),
-    },
-
-    # ========== 输出节点 ==========
-    "output_result": {
-        "label": "结果输出",
+    "output": {
+        "label": "输出",
         "icon": "📤",
         "stage": "finalize",
-        "description": "汇总所有生成结果，返回给调用方",
-        "handler": _lazy_import_stage("finalize"),
+        "description": "汇总所有生成结果",
+        "handler": None,
     },
-    "output_oss_upload": {
-        "label": "OSS 上传",
-        "icon": "☁",
-        "stage": "finalize",
-        "description": "将生成图片上传到阿里云 OSS",
-        "handler": _lazy_import_stage("finalize"),
+    "loop": {
+        "label": "循环",
+        "icon": "🔄",
+        "stage": "generate",
+        "description": "循环执行节点",
+        "handler": None,
+    },
+    "group": {
+        "label": "分组",
+        "icon": "📁",
+        "stage": "generate",
+        "description": "节点分组",
+        "handler": None,
     },
 }
 
+
+# ============================================================================
+# Query Functions
+# ============================================================================
 
 def get_node_label(node_type: str) -> str:
     """获取节点类型的显示标签"""

@@ -28,6 +28,11 @@ config 字段可以给阶段传递参数，各阶段支持的参数：
 - analyze:  {"useModelAnalysis": bool, "useProductAnalysis": bool}
 - validate: {"timeoutMs": int}
 - generate: (使用 WorkflowOptions 中的全局配置)
+
+暴露参数 (exposed_mapping)
+--------------------------
+每个工作流可通过 exposed_mapping 暴露可注入的参数，
+前端根据此字段自动生成表单，后端通过 injector.py 注入。
 """
 
 
@@ -50,7 +55,7 @@ MAIN_BATCH_WORKFLOW: dict = {
         "llmMaxConcurrency": 3,
     },
     "canvas_nodes": [
-        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "商品图输入"},
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "商品图输入", "url": ""},
         {"id": "llm1",     "type": "llm",       "x": 400,  "y": 200, "prompt": "分析商品特征和风格", "model": "default", "w": 200, "h": 100},
         {"id": "prompt1",  "type": "prompt",    "x": 700,  "y": 200, "text": "根据分析结果生成主图提示词"},
         {"id": "gen1",     "type": "generator", "x": 1000, "y": 200, "apiProvider": "auto", "model": "", "ratio": "square", "resolution": "2k", "customRatio": "", "customSize": "", "inputs": []},
@@ -62,6 +67,41 @@ MAIN_BATCH_WORKFLOW: dict = {
         {"id": "c3", "from": "prompt1", "to": "gen1"},
         {"id": "c4", "from": "gen1",    "to": "output1"},
     ],
+    "exposed_mapping": {
+        "product_image": {
+            "node_id": "image1",
+            "path": ["url"],
+            "label": "商品图",
+            "type": "image",
+            "required": True,
+        },
+        "user_prompt": {
+            "node_id": "prompt1",
+            "path": ["text"],
+            "label": "提示词",
+            "type": "text",
+            "required": False,
+            "default": "专业商品摄影，白色背景，工作室灯光，高清8K",
+        },
+        "aspect_ratio": {
+            "node_id": "gen1",
+            "path": ["ratio"],
+            "label": "图片比例",
+            "type": "select",
+            "options": ["square", "portrait", "landscape"],
+            "required": False,
+            "default": "square",
+        },
+        "resolution": {
+            "node_id": "gen1",
+            "path": ["resolution"],
+            "label": "分辨率",
+            "type": "select",
+            "options": ["1k", "2k", "4k"],
+            "required": False,
+            "default": "2k",
+        },
+    },
 }
 
 
@@ -84,7 +124,7 @@ POSE_BATCH_WORKFLOW: dict = {
         "llmMaxConcurrency": 3,
     },
     "canvas_nodes": [
-        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "姿势模板图"},
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "姿势模板图", "url": ""},
         {"id": "prompt1",  "type": "prompt",    "x": 400,  "y": 200, "text": "预定义姿势描述提示词"},
         {"id": "gen1",     "type": "generator", "x": 700,  "y": 200, "apiProvider": "auto", "model": "", "ratio": "portrait", "resolution": "2k", "customRatio": "", "customSize": "", "inputs": []},
         {"id": "output1",  "type": "output",    "x": 1000, "y": 200},
@@ -94,6 +134,41 @@ POSE_BATCH_WORKFLOW: dict = {
         {"id": "c2", "from": "prompt1", "to": "gen1"},
         {"id": "c3", "from": "gen1",    "to": "output1"},
     ],
+    "exposed_mapping": {
+        "template_image": {
+            "node_id": "image1",
+            "path": ["url"],
+            "label": "姿势模板图",
+            "type": "image",
+            "required": True,
+        },
+        "pose_prompt": {
+            "node_id": "prompt1",
+            "path": ["text"],
+            "label": "姿势提示词",
+            "type": "text",
+            "required": False,
+            "default": "模特姿势描述",
+        },
+        "aspect_ratio": {
+            "node_id": "gen1",
+            "path": ["ratio"],
+            "label": "图片比例",
+            "type": "select",
+            "options": ["square", "portrait", "landscape"],
+            "required": False,
+            "default": "portrait",
+        },
+        "resolution": {
+            "node_id": "gen1",
+            "path": ["resolution"],
+            "label": "分辨率",
+            "type": "select",
+            "options": ["1k", "2k", "4k"],
+            "required": False,
+            "default": "2k",
+        },
+    },
 }
 
 
@@ -116,7 +191,7 @@ DETAIL_BATCH_WORKFLOW: dict = {
         "llmMaxConcurrency": 3,
     },
     "canvas_nodes": [
-        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "详情模板参考图"},
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "详情模板参考图", "url": ""},
         {"id": "gen1",     "type": "generator", "x": 400,  "y": 200, "apiProvider": "auto", "model": "", "ratio": "portrait", "resolution": "2k", "customRatio": "", "customSize": "", "inputs": []},
         {"id": "output1",  "type": "output",    "x": 700,  "y": 200},
     ],
@@ -124,6 +199,33 @@ DETAIL_BATCH_WORKFLOW: dict = {
         {"id": "c1", "from": "image1", "to": "gen1"},
         {"id": "c2", "from": "gen1",   "to": "output1"},
     ],
+    "exposed_mapping": {
+        "detail_image": {
+            "node_id": "image1",
+            "path": ["url"],
+            "label": "详情模板图",
+            "type": "image",
+            "required": True,
+        },
+        "aspect_ratio": {
+            "node_id": "gen1",
+            "path": ["ratio"],
+            "label": "图片比例",
+            "type": "select",
+            "options": ["square", "portrait", "landscape"],
+            "required": False,
+            "default": "portrait",
+        },
+        "resolution": {
+            "node_id": "gen1",
+            "path": ["resolution"],
+            "label": "分辨率",
+            "type": "select",
+            "options": ["1k", "2k", "4k"],
+            "required": False,
+            "default": "2k",
+        },
+    },
 }
 
 
@@ -146,7 +248,7 @@ QUICK_GENERATE_WORKFLOW: dict = {
         "llmMaxConcurrency": 1,
     },
     "canvas_nodes": [
-        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "参考图"},
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "参考图", "url": ""},
         {"id": "prompt1",  "type": "prompt",    "x": 400,  "y": 200, "text": "输入生图提示词"},
         {"id": "gen1",     "type": "generator", "x": 700,  "y": 200, "apiProvider": "auto", "model": "", "ratio": "square", "resolution": "2k", "customRatio": "", "customSize": "", "inputs": []},
         {"id": "output1",  "type": "output",    "x": 1000, "y": 200},
@@ -156,6 +258,41 @@ QUICK_GENERATE_WORKFLOW: dict = {
         {"id": "c2", "from": "prompt1", "to": "gen1"},
         {"id": "c3", "from": "gen1",    "to": "output1"},
     ],
+    "exposed_mapping": {
+        "ref_image": {
+            "node_id": "image1",
+            "path": ["url"],
+            "label": "参考图",
+            "type": "image",
+            "required": True,
+        },
+        "user_prompt": {
+            "node_id": "prompt1",
+            "path": ["text"],
+            "label": "提示词",
+            "type": "text",
+            "required": False,
+            "default": "专业商品摄影，高清8K",
+        },
+        "aspect_ratio": {
+            "node_id": "gen1",
+            "path": ["ratio"],
+            "label": "图片比例",
+            "type": "select",
+            "options": ["square", "portrait", "landscape"],
+            "required": False,
+            "default": "square",
+        },
+        "resolution": {
+            "node_id": "gen1",
+            "path": ["resolution"],
+            "label": "分辨率",
+            "type": "select",
+            "options": ["1k", "2k", "4k"],
+            "required": False,
+            "default": "2k",
+        },
+    },
 }
 
 
@@ -178,7 +315,7 @@ PIPELINE_FULL_WORKFLOW: dict = {
         "llmMaxConcurrency": 3,
     },
     "canvas_nodes": [
-        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "商品图输入"},
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "商品图输入", "url": ""},
         {"id": "llm1",     "type": "llm",       "x": 400,  "y": 200, "prompt": "分析商品特征", "model": "default", "w": 200, "h": 100},
         {"id": "prompt1",  "type": "prompt",    "x": 700,  "y": 200, "text": "主图提示词"},
         {"id": "gen1",     "type": "generator", "x": 1000, "y": 100, "apiProvider": "auto", "model": "", "ratio": "square",   "resolution": "2k", "customRatio": "", "customSize": "", "inputs": []},
@@ -195,6 +332,41 @@ PIPELINE_FULL_WORKFLOW: dict = {
         {"id": "c6", "from": "gen2",    "to": "gen3"},
         {"id": "c7", "from": "gen3",    "to": "output1"},
     ],
+    "exposed_mapping": {
+        "product_image": {
+            "node_id": "image1",
+            "path": ["url"],
+            "label": "商品图",
+            "type": "image",
+            "required": True,
+        },
+        "user_prompt": {
+            "node_id": "prompt1",
+            "path": ["text"],
+            "label": "提示词",
+            "type": "text",
+            "required": False,
+            "default": "专业商品摄影，白色背景，工作室灯光，高清8K",
+        },
+        "aspect_ratio": {
+            "node_id": "gen1",
+            "path": ["ratio"],
+            "label": "图片比例",
+            "type": "select",
+            "options": ["square", "portrait", "landscape"],
+            "required": False,
+            "default": "square",
+        },
+        "resolution": {
+            "node_id": "gen1",
+            "path": ["resolution"],
+            "label": "分辨率",
+            "type": "select",
+            "options": ["1k", "2k", "4k"],
+            "required": False,
+            "default": "2k",
+        },
+    },
 }
 
 
@@ -217,7 +389,7 @@ SIMPLE_BATCH_WORKFLOW: dict = {
         "llmMaxConcurrency": 0,
     },
     "canvas_nodes": [
-        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "输入图片"},
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "输入图片", "url": ""},
         {"id": "gen1",     "type": "generator", "x": 400,  "y": 200, "apiProvider": "auto", "model": "", "ratio": "square", "resolution": "1k", "customRatio": "", "customSize": "", "inputs": []},
         {"id": "output1",  "type": "output",    "x": 700,  "y": 200},
     ],
@@ -225,6 +397,33 @@ SIMPLE_BATCH_WORKFLOW: dict = {
         {"id": "c1", "from": "image1", "to": "gen1"},
         {"id": "c2", "from": "gen1",   "to": "output1"},
     ],
+    "exposed_mapping": {
+        "ref_image": {
+            "node_id": "image1",
+            "path": ["url"],
+            "label": "输入图片",
+            "type": "image",
+            "required": True,
+        },
+        "aspect_ratio": {
+            "node_id": "gen1",
+            "path": ["ratio"],
+            "label": "图片比例",
+            "type": "select",
+            "options": ["square", "portrait", "landscape"],
+            "required": False,
+            "default": "square",
+        },
+        "resolution": {
+            "node_id": "gen1",
+            "path": ["resolution"],
+            "label": "分辨率",
+            "type": "select",
+            "options": ["1k", "2k", "4k"],
+            "required": False,
+            "default": "1k",
+        },
+    },
 }
 
 

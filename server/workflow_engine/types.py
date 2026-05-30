@@ -1,19 +1,29 @@
+"""
+Pipeline type definitions.
+
+Generic types for the template-driven workflow engine.
+No business-specific fields — all data flows through runtime_template.
+"""
+
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 
-# ===== Supporting Types =====
+# ===== Core Types =====
 
 @dataclass
-class RowImages:
-    product_b64: str
-    model_b64: str
-    style_ref_b64: Optional[str] = None
-    detail_b64: Optional[str] = None
+class NodeOutput:
+    """Output from a single node execution."""
+    node_id: str
+    node_type: str
+    result: Any = None
+    error: Optional[str] = None
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
 class PipelineProgress:
+    """Progress update from a pipeline stage."""
     stage: str
     step: int
     total: int
@@ -21,49 +31,29 @@ class PipelineProgress:
 
 
 @dataclass
-class TemplateSlot:
-    ref_index: int
-    ref_url: str
-    prompt: str
+class PipelineContext:
+    """Generic pipeline context — no business-specific fields.
 
+    All node data flows through runtime_template (the injected template JSON).
+    Node outputs are stored in node_outputs keyed by node_id.
+    """
+    runtime_template: dict
+    dynamic_inputs: dict[str, Any] = field(default_factory=dict)
+    node_outputs: dict[str, NodeOutput] = field(default_factory=dict)
+    abort_ref: dict[str, bool] = field(default_factory=lambda: {"current": False})
+    signal: Optional[Any] = None
+    on_progress: Callable[[PipelineProgress], None] = lambda _: None
+    on_row_result: Callable[[str, list[str], list[str]], None] = lambda _id, _urls, _errors: None
 
-@dataclass
-class WorkflowOptions:
+    # Execution options (from template or API)
     generate_concurrency: int = 4
     generate_timeout_ms: int = 300_000
     validate_timeout_ms: int = 30_000
-    llm_max_concurrency: int = 4
-
-
-# ===== Core Types =====
-
-@dataclass
-class PipelineContext:
-    rows: list[Any]
-    model_id: str
-    width: int
-    height: int
-    has_lingmao_data: bool
-    use_hybrid: bool = False
-    vision_model: Optional[Any] = None
-    text_model: Optional[Any] = None
-    logo_b64: Optional[str] = None
-    template_slots: Optional[list[TemplateSlot]] = None
-    selected_model_id: Optional[str] = None
-
-    row_images: dict[str, RowImages] = field(default_factory=dict)
-    row_prompts: dict[str, str] = field(default_factory=dict)
-    row_results: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-    abort_ref: dict[str, bool] = field(default_factory=lambda: {"current": False})
-    signal: Optional[Any] = None
-
-    on_progress: Callable[[PipelineProgress], None] = lambda _: None
-    on_row_result: Callable[[str, list[str], list[str]], None] = lambda _id, _urls, _errors: None
 
 
 @dataclass
 class StageConfig:
+    """Configuration for a single pipeline stage."""
     id: str
     enabled: bool = True
     config: Optional[dict[str, Any]] = None
@@ -71,7 +61,16 @@ class StageConfig:
 
 @dataclass
 class WorkflowConfig:
+    """Complete workflow configuration."""
     name: str
     description: str
     stages: list[StageConfig] = field(default_factory=list)
-    options: WorkflowOptions = field(default_factory=WorkflowOptions)
+    options: dict = field(default_factory=dict)
+    exposed_mapping: dict = field(default_factory=dict)
+
+
+# Legacy compatibility shims — kept for import stability
+# These are no longer used by the engine but may be imported elsewhere
+RowImages = None
+TemplateSlot = None
+WorkflowOptions = None

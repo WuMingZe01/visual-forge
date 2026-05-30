@@ -6764,6 +6764,7 @@ def _get_saved_workflow(name: str):
 def list_all_workflows():
     """列出所有工作流模板（预设 + 画布保存的）"""
     # 预设模板
+    from workflow_engine.injector import get_exposed_fields
     presets = []
     for key, preset in WORKFLOW_PRESETS.items():
         presets.append({
@@ -6775,6 +6776,8 @@ def list_all_workflows():
             "connection_count": len(preset.get("canvas_connections", [])),
             "canvas_nodes": preset.get("canvas_nodes", []),
             "canvas_connections": preset.get("canvas_connections", []),
+            "exposed_mapping": preset.get("exposed_mapping", {}),
+            "exposed_fields": get_exposed_fields(preset),
             "generator_config": {},
         })
     # 画布保存的模板
@@ -6788,6 +6791,7 @@ def get_workflow_detail(name: str):
     # 先查预设
     preset = WORKFLOW_PRESETS.get(name)
     if preset:
+        from workflow_engine.injector import get_exposed_fields
         return {
             "name": preset.get("name", name),
             "source": "preset",
@@ -6796,6 +6800,8 @@ def get_workflow_detail(name: str):
             "options": preset.get("options", {}),
             "nodes": preset.get("canvas_nodes", []),
             "connections": preset.get("canvas_connections", []),
+            "exposed_mapping": preset.get("exposed_mapping", {}),
+            "exposed_fields": get_exposed_fields(preset),
         }
     # 再查画布保存的
     data = _get_saved_workflow(name)
@@ -6821,6 +6827,81 @@ def delete_workflow(name: str):
         raise HTTPException(status_code=404, detail=f"工作流不存在或为预设模板: {name}")
     os.remove(fpath)
     return {"ok": True, "deleted": name}
+
+
+@app.post("/api/vf/workflows/execute")
+async def execute_workflow_unified(request: Request):
+    """
+    统一工作流执行端点 — 模板驱动 + 动态参数注入。
+
+    Body:
+    {
+        "template_id": "主图批量生成",
+        "dynamic_inputs": {
+            "product_image": "https://...",
+            "user_prompt": "一个超模在巴黎街头街拍"
+        }
+    }
+
+    流程: 加载模板 → 注入参数 → 构建上下文 → 提交执行
+    """
+    from workflow_engine.injector import inject_parameters, InjectionError
+    from workflow_engine.types import PipelineContext, WorkflowConfig, StageConfig
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    template_id = body.get("template_id", "")
+    dynamic_inputs = body.get("dynamic_inputs", {})
+
+    if not template_id:
+        raise HTTPException(status_code=400, detail="缺少 template_id")
+
+    # 加载模板（预设 or 保存的）
+    template = WORKFLOW_PRESETS.get(template_id)
+    if not template:
+        template = _get_saved_workflow(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail=f"工作流不存在: {template_id}")
+
+    # 参数注入
+    try:
+        runtime = inject_parameters(template, dynamic_inputs)
+    except InjectionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 构建 WorkflowConfig
+    stages_data = template.get("stages", [])
+    opts = template.get("options", {})
+    config = WorkflowConfig(
+        name=template.get("name", template_id),
+        description=template.get("description", ""),
+        stages=[StageConfig(id=s["id"], enabled=s.get("enabled", True), config=s.get("config")) for s in stages_data],
+        options=opts,
+        exposed_mapping=template.get("exposed_mapping", {}),
+    )
+
+    # 构建 PipelineContext
+    ctx = PipelineContext(
+        runtime_template=runtime,
+        dynamic_inputs=dynamic_inputs,
+        generate_concurrency=opts.get("generateConcurrency", 4),
+        generate_timeout_ms=opts.get("generateTimeoutMs", 300_000),
+        validate_timeout_ms=opts.get("validateTimeoutMs", 30_000),
+    )
+
+    # 提交执行
+    executor = get_executor()
+    task = await executor.submit(config.name, config, ctx)
+
+    return {
+        "task_id": task.task_id,
+        "workflow_name": config.name,
+        "status": task.status.value,
+        "injected_fields": list(dynamic_inputs.keys()),
+    }
 
 
 class WorkflowRunRequest(BaseModel):
@@ -6905,7 +6986,8 @@ def _extract_prompt_texts(nodes: list, connections: list) -> str:
 @app.post("/api/vf/workflows/{name}/run")
 async def run_workflow_template(name: str, request: Request):
     """运行指定的工作流模板"""
-    from workflow_engine.types import PipelineContext, WorkflowConfig, StageConfig, WorkflowOptions
+    from workflow_engine.types import PipelineContext, WorkflowConfig, StageConfig
+    from workflow_engine.injector import inject_parameters, InjectionError
 
     try:
         body = await request.json()
@@ -6920,8 +7002,8 @@ async def run_workflow_template(name: str, request: Request):
         stages_data = preset.get("stages", [])
         opts = preset.get("options", {})
         wf_name = preset.get("name", name)
-        canvas_nodes = []
-        canvas_connections = []
+        canvas_nodes = list(preset.get("canvas_nodes", []))
+        canvas_connections = list(preset.get("canvas_connections", []))
     else:
         saved = _get_saved_workflow(name)
         if not saved:
@@ -6962,28 +7044,41 @@ async def run_workflow_template(name: str, request: Request):
     if not rows:
         raise HTTPException(status_code=400, detail="需要提供 rows 或 product_image_url")
 
+    # Inject image URLs into canvas_nodes for the runtime template
+    runtime_nodes = list(canvas_nodes) if canvas_nodes else []
+    if rows and runtime_nodes:
+        # Inject first row's image into first image node
+        first_row = rows[0] if isinstance(rows, list) else {}
+        for node in runtime_nodes:
+            if node.get("type") == "image":
+                img_url = first_row.get("product_image_url") or first_row.get("image_url") or ""
+                if img_url and not node.get("url"):
+                    node["url"] = img_url
+                break
+
     # 构造 WorkflowConfig
     wf_stages = [StageConfig(id=s["id"], enabled=s.get("enabled", True), config=s.get("config")) for s in stages_data]
-    wf_options = WorkflowOptions(
-        generate_concurrency=opts.get("generateConcurrency", 4),
-        generate_timeout_ms=opts.get("generateTimeoutMs", 480000),
-        validate_timeout_ms=opts.get("validateTimeoutMs", 30000),
-        llm_max_concurrency=opts.get("llmMaxConcurrency", 3),
-    )
     wf_config = WorkflowConfig(
         name=wf_name,
         description=f"从模板 [{wf_name}] 运行",
         stages=wf_stages,
-        options=wf_options,
+        options=opts,
     )
 
+    # Build runtime template
+    runtime_template = {
+        "nodes": runtime_nodes,
+        "connections": canvas_connections,
+        "canvas_nodes": runtime_nodes,
+        "canvas_connections": canvas_connections,
+    }
+
     ctx = PipelineContext(
-        rows=rows,
-        model_id=req.model_id,
-        width=req.width,
-        height=req.height,
-        has_lingmao_data=False,
-        use_hybrid=req.use_hybrid,
+        runtime_template=runtime_template,
+        dynamic_inputs={},
+        generate_concurrency=opts.get("generateConcurrency", 4),
+        generate_timeout_ms=opts.get("generateTimeoutMs", 480000),
+        validate_timeout_ms=opts.get("validateTimeoutMs", 30000),
     )
 
     executor = get_executor(max_concurrent=5)

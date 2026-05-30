@@ -1,11 +1,23 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Play, ChevronDown, ChevronRight, Upload, X, Image as ImageIcon,
-  Loader2, CheckCircle2, AlertCircle, Download, RefreshCw, Zap,
-  Settings, Trash2, Eye, Edit3, Workflow
+  Play, ChevronRight, Upload, X, Image as ImageIcon,
+  Loader2, CheckCircle2, AlertCircle, RefreshCw, Zap,
+  Settings, Edit3, Workflow
 } from 'lucide-react';
 import { useWorkflowStore } from '@/store/useWorkflowStore';
+
+/* ── Backend types ─────────────────────────────────────────── */
+
+interface ExposedField {
+  name: string;
+  label: string;
+  type: 'image' | 'text' | 'select';
+  required: boolean;
+  default: string | null;
+  options: string[];
+  placeholder: string;
+}
 
 interface WorkflowTemplate {
   name: string;
@@ -17,6 +29,7 @@ interface WorkflowTemplate {
   canvas_nodes?: any[];
   canvas_connections?: any[];
   generator_config?: Record<string, any>;
+  exposed_fields?: ExposedField[];
 }
 
 interface TaskStatus {
@@ -37,26 +50,22 @@ interface TaskStatus {
 
 const API = '';
 
+/* ── Component ─────────────────────────────────────────────── */
+
 export function WorkflowRunner() {
   const navigate = useNavigate();
   const { refreshTick, setWorkflows, setPendingWorkflow } = useWorkflowStore();
 
   const [workflows, setLocalWorkflows] = useState<WorkflowTemplate[]>([]);
   const [selected, setSelected] = useState<WorkflowTemplate | null>(null);
+  const [selectedDetail, setSelectedDetail] = useState<WorkflowTemplate | null>(null);
   const [loading, setLoading] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
 
-  // Form parameters
-  const [productImage, setProductImage] = useState('');
-  const [modelImage, setModelImage] = useState('');
-  const [styleRef, setStyleRef] = useState('');
-  const [prompt, setPrompt] = useState('');
-  const [count, setCount] = useState(1);
-  const [modelId, setModelId] = useState('gpt-image-2-vip');
-  const [width, setWidth] = useState(2448);
-  const [height, setHeight] = useState(3264);
-  const [useHybrid, setUseHybrid] = useState(true);
+  // Dynamic form data: key = field.name, value = string
+  const [formData, setFormData] = useState<Record<string, string>>({});
 
   // Task state
   const [currentTask, setCurrentTask] = useState<TaskStatus | null>(null);
@@ -66,16 +75,13 @@ export function WorkflowRunner() {
   // Stage progress animation
   const [activeStageIdx, setActiveStageIdx] = useState(-1);
 
-  // Determine which form fields the workflow needs
-  const workflowType = selected ? classifyWorkflow(selected) : 'generic';
-
-  // Load workflow list
+  // ── Load workflow list ──
   const loadWorkflows = useCallback(() => {
     setLoading(true);
     fetch(`${API}/api/vf/workflows`)
       .then(r => r.json())
       .then(d => {
-        const list = d.workflows || [];
+        const list: WorkflowTemplate[] = d.workflows || [];
         setLocalWorkflows(list);
         setWorkflows(list);
         if (list.length > 0 && !selected) setSelected(list[0]);
@@ -90,11 +96,35 @@ export function WorkflowRunner() {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Re-fetch when canvas saves a new workflow (refreshTick changes)
+  // Re-fetch when canvas saves a new workflow
   useEffect(() => {
     if (refreshTick > 0) loadWorkflows();
   }, [refreshTick, loadWorkflows]);
 
+  // ── Fetch workflow detail (exposed_fields) when selected ──
+  useEffect(() => {
+    if (!selected) { setSelectedDetail(null); setFormData({}); return; }
+    setDetailLoading(true);
+    fetch(`${API}/api/vf/workflows/${encodeURIComponent(selected.name)}`)
+      .then(r => r.json())
+      .then(detail => {
+        setSelectedDetail(detail);
+        // Initialize form defaults
+        const defaults: Record<string, string> = {};
+        const fields: ExposedField[] = detail.exposed_fields || [];
+        fields.forEach(f => {
+          defaults[f.name] = f.default ?? '';
+        });
+        setFormData(defaults);
+      })
+      .catch(() => {
+        setSelectedDetail(selected);
+        setFormData({});
+      })
+      .finally(() => setDetailLoading(false));
+  }, [selected]);
+
+  // ── Task list refresh ──
   const refreshTasks = useCallback(() => {
     fetch(`${API}/api/vf/pipelines/tasks`)
       .then(r => r.json())
@@ -102,7 +132,7 @@ export function WorkflowRunner() {
       .catch(() => {});
   }, []);
 
-  // Poll task status with stage tracking
+  // ── Poll task status ──
   const pollTask = useCallback((taskId: string) => {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
@@ -111,7 +141,6 @@ export function WorkflowRunner() {
         const task = await res.json();
         setCurrentTask(task);
 
-        // Animate stage progress
         if (task.enabled_stages && task.status === 'running') {
           const stage = task.current_stage || '';
           const idx = task.enabled_stages.indexOf(stage);
@@ -129,53 +158,51 @@ export function WorkflowRunner() {
     }, 2000);
   }, [refreshTasks]);
 
-  // Image upload handler
-  const handleImageUpload = useCallback((setter: (v: string) => void) => (e: React.ChangeEvent<HTMLInputElement>) => {
+  // ── Image upload handler (converts file to data URL) ──
+  const handleImageUpload = useCallback((fieldName: string) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => setter(reader.result as string);
+    reader.onload = () => setFormData(prev => ({ ...prev, [fieldName]: reader.result as string }));
     reader.readAsDataURL(file);
   }, []);
 
-  // Run workflow
+  // ── Run workflow via new execute endpoint ──
   const handleRun = useCallback(async () => {
     if (!selected) return;
-    if (!productImage && !prompt) {
-      setError('请上传商品图片或填写提示词');
-      return;
+
+    // Validate required fields
+    const fields = selectedDetail?.exposed_fields || [];
+    for (const f of fields) {
+      if (f.required && !formData[f.name]?.trim()) {
+        setError(`请填写必填字段: ${f.label}`);
+        return;
+      }
     }
+
     setRunning(true);
     setError('');
     setCurrentTask(null);
     setActiveStageIdx(0);
 
     try {
-      const body: any = {
-        model_id: modelId,
-        width, height,
-        use_hybrid: useHybrid,
-        count,
-        prompt,
-      };
-      if (productImage) body.product_image_url = productImage;
-      if (modelImage) body.model_image_url = modelImage;
-      if (styleRef) body.style_ref_url = styleRef;
-
-      const res = await fetch(`${API}/api/vf/workflows/${encodeURIComponent(selected.name)}/run`, {
+      const res = await fetch(`${API}/api/vf/workflows/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          template_id: selected.name,
+          dynamic_inputs: formData,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || '运行失败');
 
       setCurrentTask({
         task_id: data.task_id,
-        workflow_name: data.workflow_name,
+        workflow_name: data.workflow_name || selected.name,
         status: data.status,
-        row_count: data.row_count,
-        enabled_stages: data.enabled_stages,
+        row_count: data.row_count || 0,
+        enabled_stages: data.enabled_stages || [],
       });
       pollTask(data.task_id);
     } catch (e: any) {
@@ -183,11 +210,10 @@ export function WorkflowRunner() {
       setRunning(false);
       setActiveStageIdx(-1);
     }
-  }, [selected, productImage, modelImage, styleRef, prompt, count, modelId, width, height, useHybrid, pollTask]);
+  }, [selected, selectedDetail, formData, pollTask]);
 
-  // Navigate to canvas editor with workflow loaded
+  // ── Navigate to canvas editor ──
   const handleEditInCanvas = useCallback((wf: WorkflowTemplate) => {
-    // Fetch full workflow detail (includes nodes/connections) and set as pending
     fetch(`${API}/api/vf/workflows/${encodeURIComponent(wf.name)}`)
       .then(r => r.json())
       .then(detail => {
@@ -195,12 +221,12 @@ export function WorkflowRunner() {
         navigate('/infinite-canvas');
       })
       .catch(() => {
-        // Fallback: use local data if fetch fails
         setPendingWorkflow(wf);
         navigate('/infinite-canvas');
       });
   }, [navigate, setPendingWorkflow]);
 
+  // ── Helpers ──
   const stageLabel = (id: string) => {
     const map: Record<string, string> = {
       prepare: '准备', analyze: 'AI分析', generate: '生图', validate: '校验', finalize: '输出',
@@ -215,12 +241,95 @@ export function WorkflowRunner() {
     return <span className="w-3.5 h-3.5 rounded-full bg-forge-border inline-block" />;
   };
 
-  // Determine which input fields to show based on workflow stages
-  const showProductImage = workflowType !== 'text-only';
-  const showModelImage = workflowType === 'two-image' || workflowType === 'model-swap';
-  const showStyleRef = workflowType === 'style-transfer';
-  const showPrompt = workflowType !== 'image-only';
-  const needsImages = showProductImage;
+  // ── Exposed fields from selected workflow detail ──
+  const exposedFields: ExposedField[] = selectedDetail?.exposed_fields || [];
+
+  // ── Render a single dynamic field ──
+  const renderField = (field: ExposedField) => {
+    const value = formData[field.name] ?? '';
+
+    if (field.type === 'image') {
+      return (
+        <div key={field.name}>
+          <label className="text-xs text-forge-text2 mb-1 block">
+            {field.label} {field.required && <span className="text-red-400">*</span>}
+          </label>
+          {value && value.startsWith('data:') ? (
+            <div className="relative group">
+              <img src={value} className="w-full h-24 object-contain rounded-lg bg-forge-surface2" alt="" />
+              <button
+                onClick={() => setFormData(prev => ({ ...prev, [field.name]: '' }))}
+                className="absolute top-1 right-1 bg-black/60 rounded p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ) : value && (value.startsWith('http://') || value.startsWith('https://')) ? (
+            <div className="relative group">
+              <img src={value} className="w-full h-24 object-contain rounded-lg bg-forge-surface2" alt="" />
+              <button
+                onClick={() => setFormData(prev => ({ ...prev, [field.name]: '' }))}
+                className="absolute top-1 right-1 bg-black/60 rounded p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <label className="flex items-center justify-center gap-2 h-20 border-2 border-dashed border-forge-border rounded-lg cursor-pointer hover:border-forge-cyan/40 text-forge-text2 text-xs transition-colors">
+                <Upload size={14} /> 上传图片
+                <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload(field.name)} />
+              </label>
+              <input
+                type="text"
+                value={value}
+                onChange={e => setFormData(prev => ({ ...prev, [field.name]: e.target.value }))}
+                placeholder={field.placeholder || '或输入图片 URL'}
+                className="w-full bg-forge-surface2 border border-forge-border rounded-lg px-3 py-1.5 text-sm text-forge-text focus:border-forge-cyan/40 outline-none"
+              />
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    if (field.type === 'select') {
+      return (
+        <div key={field.name}>
+          <label className="text-xs text-forge-text2 mb-1 block">
+            {field.label} {field.required && <span className="text-red-400">*</span>}
+          </label>
+          <select
+            value={value}
+            onChange={e => setFormData(prev => ({ ...prev, [field.name]: e.target.value }))}
+            className="w-full bg-forge-surface2 border border-forge-border rounded-lg px-3 py-2 text-sm text-forge-text focus:border-forge-cyan/40 outline-none"
+          >
+            {!field.required && <option value="">-- 请选择 --</option>}
+            {field.options.map(opt => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        </div>
+      );
+    }
+
+    // Default: text / textarea
+    return (
+      <div key={field.name}>
+        <label className="text-xs text-forge-text2 mb-1 block">
+          {field.label} {field.required && <span className="text-red-400">*</span>}
+        </label>
+        <textarea
+          value={value}
+          onChange={e => setFormData(prev => ({ ...prev, [field.name]: e.target.value }))}
+          placeholder={field.placeholder || `请输入${field.label}`}
+          className="w-full bg-forge-surface2 border border-forge-border rounded-lg px-3 py-2 text-sm text-forge-text resize-none h-16 focus:border-forge-cyan/40 outline-none"
+        />
+      </div>
+    );
+  };
+
+  /* ── JSX ──────────────────────────────────────────────────── */
 
   return (
     <div className="space-y-4">
@@ -230,7 +339,7 @@ export function WorkflowRunner() {
           <h2 className="font-display text-lg font-bold text-forge-text flex items-center gap-2">
             <Zap size={20} className="text-forge-cyan" /> 工作流执行
           </h2>
-          <p className="text-xs text-forge-text2 mt-0.5">选择工作流模板，上传素材，一键出图</p>
+          <p className="text-xs text-forge-text2 mt-0.5">选择工作流模板，填写参数，一键执行</p>
         </div>
         <button
           onClick={() => navigate('/infinite-canvas')}
@@ -248,200 +357,134 @@ export function WorkflowRunner() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Left: workflow selection + parameters */}
+        {/* ─── Left column: workflow list ─── */}
         <div className="lg:col-span-1 space-y-3">
-          {/* Workflow list */}
           <div className="glass-card p-4 space-y-3">
             <h3 className="text-sm font-semibold text-forge-text flex items-center gap-2">
               <Settings size={14} className="text-forge-cyan" /> 选择工作流
             </h3>
             {loading ? (
-              <div className="text-center py-6 text-forge-text2"><Loader2 size={20} className="animate-spin mx-auto" /></div>
+              <div className="text-center py-6 text-forge-text2">
+                <Loader2 size={20} className="animate-spin mx-auto" />
+              </div>
             ) : (
-              <div className="space-y-1.5 max-h-60 overflow-y-auto">
-                {workflows.map(wf => (
-                  <button
-                    key={wf.name}
-                    onClick={() => setSelected(wf)}
-                    className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-all ${
-                      selected?.name === wf.name
-                        ? 'bg-forge-cyan/10 text-forge-cyan border border-forge-cyan/20'
-                        : 'text-forge-text2 hover:bg-forge-surface2/50 border border-transparent'
-                    }`}
-                  >
-                    <div className="font-medium flex items-center gap-2">
-                      {wf.name}
-                      {(wf.source === 'canvas' || (wf.canvas_nodes && wf.canvas_nodes.length > 0)) && (
+              <div className="space-y-1.5 max-h-[calc(100vh-320px)] overflow-y-auto">
+                {workflows.map(wf => {
+                  const fieldCount = wf.exposed_fields?.length ?? 0;
+                  const isActive = selected?.name === wf.name;
+                  return (
+                    <div
+                      key={wf.name}
+                      onClick={() => setSelected(wf)}
+                      className={`w-full text-left px-3 py-3 rounded-lg text-sm cursor-pointer transition-all ${
+                        isActive
+                          ? 'bg-forge-cyan/10 text-forge-cyan border border-forge-cyan/20'
+                          : 'text-forge-text2 hover:bg-forge-surface2/50 border border-transparent'
+                      }`}
+                    >
+                      {/* Name row */}
+                      <div className="font-medium flex items-center gap-2">
+                        <Workflow size={14} className={isActive ? 'text-forge-cyan' : 'text-forge-text2/60'} />
+                        <span className="flex-1 truncate">{wf.name}</span>
+                        {fieldCount > 0 && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-forge-surface2 text-forge-text2 whitespace-nowrap">
+                            {fieldCount} 个参数
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Description */}
+                      {wf.description && (
+                        <div className="text-xs opacity-60 mt-1 line-clamp-2">{wf.description}</div>
+                      )}
+
+                      {/* Action buttons */}
+                      <div className="flex items-center gap-2 mt-2">
                         <button
                           onClick={(e) => { e.stopPropagation(); handleEditInCanvas(wf); }}
-                          className="opacity-40 hover:opacity-100 transition-opacity"
-                          title="在画布中编辑"
+                          className="flex items-center gap-1 px-2 py-1 rounded text-[10px] bg-forge-surface2 text-forge-text2 hover:text-forge-cyan hover:bg-forge-cyan/5 transition-colors"
                         >
-                          <Edit3 size={12} />
+                          <Edit3 size={10} /> 编辑画布
                         </button>
-                      )}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setSelected(wf); }}
+                          className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] transition-colors ${
+                            isActive
+                              ? 'bg-forge-cyan/20 text-forge-cyan'
+                              : 'bg-forge-surface2 text-forge-text2 hover:text-forge-cyan hover:bg-forge-cyan/5'
+                          }`}
+                        >
+                          <Play size={10} /> 执行
+                        </button>
+                        <span className={`ml-auto px-1.5 py-0.5 rounded text-[10px] ${
+                          wf.source === 'preset' ? 'bg-blue-500/10 text-blue-400' : 'bg-purple-500/10 text-purple-400'
+                        }`}>
+                          {wf.source === 'preset' ? '预设' : '画布'}
+                        </span>
+                      </div>
                     </div>
-                    <div className="text-xs opacity-60 mt-0.5 flex items-center gap-2">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${
-                        wf.source === 'preset' ? 'bg-blue-500/10 text-blue-400' : 'bg-purple-500/10 text-purple-400'
-                      }`}>
-                        {wf.source === 'preset' ? '预设' : '画布'}
-                      </span>
-                      {wf.stages.filter(s => s.enabled).map(s => stageLabel(s.id)).join(' → ')}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Parameter form */}
-          <div className="glass-card p-4 space-y-3">
-            <h3 className="text-sm font-semibold text-forge-text">输入参数</h3>
-
-            {/* Product image */}
-            {showProductImage && (
-              <div>
-                <label className="text-xs text-forge-text2 mb-1 block">
-                  {showModelImage ? '商品白底图 *' : '商品图 *'}
-                </label>
-                {productImage ? (
-                  <div className="relative group">
-                    <img src={productImage} className="w-full h-24 object-contain rounded-lg bg-forge-surface2" alt="" />
-                    <button onClick={() => setProductImage('')} className="absolute top-1 right-1 bg-black/60 rounded p-0.5 opacity-0 group-hover:opacity-100"><X size={12} /></button>
-                  </div>
-                ) : (
-                  <label className="flex items-center justify-center gap-2 h-24 border-2 border-dashed border-forge-border rounded-lg cursor-pointer hover:border-forge-cyan/40 text-forge-text2 text-xs">
-                    <Upload size={16} /> 上传商品图
-                    <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload(setProductImage)} />
-                  </label>
+                  );
+                })}
+                {workflows.length === 0 && !loading && (
+                  <div className="text-center py-6 text-forge-text2/50 text-xs">暂无工作流</div>
                 )}
               </div>
             )}
-
-            {/* Model/reference image */}
-            {showModelImage && (
-              <div>
-                <label className="text-xs text-forge-text2 mb-1 block">
-                  {workflowType === 'model-swap' ? '目标模特图 *' : '模特参考图'}
-                </label>
-                {modelImage ? (
-                  <div className="relative group">
-                    <img src={modelImage} className="w-full h-24 object-contain rounded-lg bg-forge-surface2" alt="" />
-                    <button onClick={() => setModelImage('')} className="absolute top-1 right-1 bg-black/60 rounded p-0.5 opacity-0 group-hover:opacity-100"><X size={12} /></button>
-                  </div>
-                ) : (
-                  <label className="flex items-center justify-center gap-2 h-20 border-2 border-dashed border-forge-border rounded-lg cursor-pointer hover:border-forge-cyan/40 text-forge-text2 text-xs">
-                    <Upload size={14} /> 上传模特图
-                    <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload(setModelImage)} />
-                  </label>
-                )}
-              </div>
-            )}
-
-            {/* Style reference */}
-            {showStyleRef && (
-              <div>
-                <label className="text-xs text-forge-text2 mb-1 block">风格参考图</label>
-                {styleRef ? (
-                  <div className="relative group">
-                    <img src={styleRef} className="w-full h-20 object-contain rounded-lg bg-forge-surface2" alt="" />
-                    <button onClick={() => setStyleRef('')} className="absolute top-1 right-1 bg-black/60 rounded p-0.5 opacity-0 group-hover:opacity-100"><X size={12} /></button>
-                  </div>
-                ) : (
-                  <label className="flex items-center justify-center gap-2 h-16 border-2 border-dashed border-forge-border rounded-lg cursor-pointer hover:border-forge-cyan/40 text-forge-text2 text-xs">
-                    <Upload size={14} /> 上传风格参考
-                    <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload(setStyleRef)} />
-                  </label>
-                )}
-              </div>
-            )}
-
-            {/* Prompt */}
-            {showPrompt && (
-              <div>
-                <label className="text-xs text-forge-text2 mb-1 block">提示词（可选）</label>
-                <textarea
-                  value={prompt}
-                  onChange={e => setPrompt(e.target.value)}
-                  placeholder="留空则由 AI 自动分析生成"
-                  className="w-full bg-forge-surface2 border border-forge-border rounded-lg px-3 py-2 text-sm text-forge-text resize-none h-16 focus:border-forge-cyan/40 outline-none"
-                />
-              </div>
-            )}
-
-            {/* Model selection */}
-            <div>
-              <label className="text-xs text-forge-text2 mb-1 block">生图模型</label>
-              <select
-                value={modelId}
-                onChange={e => setModelId(e.target.value)}
-                className="w-full bg-forge-surface2 border border-forge-border rounded-lg px-3 py-2 text-sm text-forge-text focus:border-forge-cyan/40 outline-none"
-              >
-                <option value="gpt-image-2-vip">GPT-Image-2 VIP (Grsai)</option>
-                <option value="gpt-image-2">GPT-Image-2 (Grsai)</option>
-                <option value="gpt-image-2-all">GPT-Image-2 ALL (Yunwu)</option>
-                <option value="gpt-image-1-mini">GPT-Image-1 Mini (Yunwu)</option>
-                <option value="nano-banana-pro">Nano Banana Pro</option>
-              </select>
-            </div>
-
-            {/* Resolution */}
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-xs text-forge-text2 mb-1 block">宽度</label>
-                <select value={width} onChange={e => setWidth(+e.target.value)} className="w-full bg-forge-surface2 border border-forge-border rounded-lg px-2 py-1.5 text-sm text-forge-text outline-none">
-                  <option value={1024}>1024</option>
-                  <option value={2048}>2048</option>
-                  <option value={2448}>2448</option>
-                  <option value={3264}>3264</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-xs text-forge-text2 mb-1 block">高度</label>
-                <select value={height} onChange={e => setHeight(+e.target.value)} className="w-full bg-forge-surface2 border border-forge-border rounded-lg px-2 py-1.5 text-sm text-forge-text outline-none">
-                  <option value={1024}>1024</option>
-                  <option value={2048}>2048</option>
-                  <option value={2448}>2448</option>
-                  <option value={3264}>3264</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Count */}
-            <div>
-              <label className="text-xs text-forge-text2 mb-1 block">生成数量</label>
-              <input
-                type="number" min={1} max={8} value={count}
-                onChange={e => setCount(+e.target.value)}
-                className="w-full bg-forge-surface2 border border-forge-border rounded-lg px-3 py-1.5 text-sm text-forge-text outline-none"
-              />
-            </div>
-
-            {/* Hybrid engine */}
-            <label className="flex items-center gap-2 text-sm text-forge-text2 cursor-pointer">
-              <input type="checkbox" checked={useHybrid} onChange={e => setUseHybrid(e.target.checked)} className="accent-forge-cyan" />
-              启用混合引擎（Grsai + Yunwu 负载均衡）
-            </label>
-
-            {/* Run button */}
-            <button
-              onClick={handleRun}
-              disabled={running || (needsImages && !productImage && !prompt)}
-              className="w-full py-3 rounded-xl bg-gradient-to-r from-forge-cyan to-purple-500 text-forge-bg font-semibold disabled:opacity-40 flex items-center justify-center gap-2 transition-all hover:shadow-lg hover:shadow-forge-cyan/20"
-            >
-              {running ? (
-                <><Loader2 size={16} className="animate-spin" /> 运行中…</>
-              ) : (
-                <><Play size={16} /> 运行工作流</>
-              )}
-            </button>
           </div>
         </div>
 
-        {/* Right: execution status + results */}
+        {/* ─── Right column: dynamic form + results ─── */}
         <div className="lg:col-span-2 space-y-3">
-          {/* Current task status with animated progress */}
+          {/* Dynamic form */}
+          {selected && (
+            <div className="glass-card p-4 space-y-3">
+              <div className="flex items-center justify-between mb-1">
+                <h3 className="text-sm font-semibold text-forge-text flex items-center gap-2">
+                  <ImageIcon size={14} className="text-forge-cyan" />
+                  {selected.name}
+                </h3>
+                {selectedDetail?.description && (
+                  <span className="text-xs text-forge-text2/60 max-w-xs truncate">{selectedDetail.description}</span>
+                )}
+              </div>
+
+              {detailLoading ? (
+                <div className="text-center py-8 text-forge-text2">
+                  <Loader2 size={20} className="animate-spin mx-auto" />
+                  <p className="text-xs mt-2">加载工作流参数…</p>
+                </div>
+              ) : exposedFields.length > 0 ? (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {exposedFields.map(field => (
+                      <div key={field.name} className={field.type === 'text' ? 'md:col-span-2' : ''}>
+                        {renderField(field)}
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Run button */}
+                  <button
+                    onClick={handleRun}
+                    disabled={running}
+                    className="w-full py-3 rounded-xl bg-gradient-to-r from-forge-cyan to-purple-500 text-forge-bg font-semibold disabled:opacity-40 flex items-center justify-center gap-2 transition-all hover:shadow-lg hover:shadow-forge-cyan/20"
+                  >
+                    {running ? (
+                      <><Loader2 size={16} className="animate-spin" /> 运行中…</>
+                    ) : (
+                      <><Play size={16} /> 运行工作流</>
+                    )}
+                  </button>
+                </>
+              ) : (
+                <div className="text-center py-8 text-forge-text2/50 text-sm">
+                  该工作流没有可配置的参数
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Current task status */}
           {currentTask && (
             <div className="glass-card p-4 space-y-3">
               <div className="flex items-center justify-between">
@@ -457,32 +500,34 @@ export function WorkflowRunner() {
                 </span>
               </div>
 
-              {/* Stage progress with animation */}
-              <div className="flex items-center gap-1 flex-wrap">
-                {currentTask.enabled_stages.map((stage, i) => {
-                  const isActive = running && activeStageIdx === i;
-                  const isDone = running && activeStageIdx > i;
-                  const isComplete = currentTask.status === 'completed';
-                  return (
-                    <div key={stage} className="flex items-center gap-1">
-                      <span className={`px-2 py-0.5 rounded text-xs transition-all duration-300 ${
-                        isComplete ? 'bg-green-500/10 text-green-400' :
-                        isActive ? 'bg-forge-cyan/20 text-forge-cyan animate-pulse scale-105' :
-                        isDone ? 'bg-green-500/10 text-green-400' :
-                        'bg-forge-surface2 text-forge-text2'
-                      }`}>
-                        {isActive && <Loader2 size={10} className="inline animate-spin mr-1" />}
-                        {stageLabel(stage)}
-                      </span>
-                      {i < currentTask.enabled_stages.length - 1 && (
-                        <ChevronRight size={12} className={`transition-colors ${
-                          isDone ? 'text-green-400' : isActive ? 'text-forge-cyan' : 'text-forge-text2/40'
-                        }`} />
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+              {/* Stage progress */}
+              {currentTask.enabled_stages && currentTask.enabled_stages.length > 0 && (
+                <div className="flex items-center gap-1 flex-wrap">
+                  {currentTask.enabled_stages.map((stage, i) => {
+                    const isActive = running && activeStageIdx === i;
+                    const isDone = running && activeStageIdx > i;
+                    const isComplete = currentTask.status === 'completed';
+                    return (
+                      <div key={stage} className="flex items-center gap-1">
+                        <span className={`px-2 py-0.5 rounded text-xs transition-all duration-300 ${
+                          isComplete ? 'bg-green-500/10 text-green-400' :
+                          isActive ? 'bg-forge-cyan/20 text-forge-cyan animate-pulse scale-105' :
+                          isDone ? 'bg-green-500/10 text-green-400' :
+                          'bg-forge-surface2 text-forge-text2'
+                        }`}>
+                          {isActive && <Loader2 size={10} className="inline animate-spin mr-1" />}
+                          {stageLabel(stage)}
+                        </span>
+                        {i < currentTask.enabled_stages.length - 1 && (
+                          <ChevronRight size={12} className={`transition-colors ${
+                            isDone ? 'text-green-400' : isActive ? 'text-forge-cyan' : 'text-forge-text2/40'
+                          }`} />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
 
               {/* Progress bar */}
               {running && (
@@ -490,7 +535,7 @@ export function WorkflowRunner() {
                   <div
                     className="h-full bg-gradient-to-r from-forge-cyan to-purple-500 rounded-full transition-all duration-1000"
                     style={{
-                      width: `${Math.min(95, ((activeStageIdx + 1) / Math.max(1, currentTask.enabled_stages.length)) * 100)}%`
+                      width: `${Math.min(95, ((activeStageIdx + 1) / Math.max(1, (currentTask.enabled_stages || []).length)) * 100)}%`
                     }}
                   />
                 </div>
@@ -502,6 +547,26 @@ export function WorkflowRunner() {
 
               {currentTask.duration_seconds != null && (
                 <div className="text-xs text-forge-text2">耗时: {currentTask.duration_seconds.toFixed(1)}s</div>
+              )}
+
+              {/* Results */}
+              {currentTask.status === 'completed' && currentTask.result && (
+                <div className="mt-2 space-y-2">
+                  <h4 className="text-xs font-semibold text-forge-text">执行结果</h4>
+                  {typeof currentTask.result === 'string' ? (
+                    <img src={currentTask.result} alt="result" className="max-w-full rounded-lg border border-forge-border" />
+                  ) : currentTask.result.images ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      {currentTask.result.images.map((img: string, i: number) => (
+                        <img key={i} src={img} alt={`result-${i}`} className="w-full rounded-lg border border-forge-border object-contain" />
+                      ))}
+                    </div>
+                  ) : (
+                    <pre className="text-xs text-forge-text2 bg-forge-surface2 rounded p-2 overflow-x-auto">
+                      {JSON.stringify(currentTask.result, null, 2)}
+                    </pre>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -548,30 +613,4 @@ export function WorkflowRunner() {
       </div>
     </div>
   );
-}
-
-/** Classify a workflow to determine which form fields to show */
-function classifyWorkflow(wf: WorkflowTemplate): string {
-  const name = (wf.name || '').toLowerCase();
-  const desc = (wf.description || '').toLowerCase();
-  const text = name + ' ' + desc;
-
-  if (text.includes('换背景') || text.includes('background')) return 'two-image';
-  if (text.includes('换模特') || text.includes('model-swap') || text.includes('换衣')) return 'model-swap';
-  if (text.includes('详情') || text.includes('detail')) return 'image-only';
-  if (text.includes('姿势') || text.includes('pose')) return 'style-transfer';
-  if (text.includes('批量') || text.includes('batch')) return 'two-image';
-  if (text.includes('快速') || text.includes('quick')) return 'generic';
-
-  // Check canvas node types for hints
-  const nodes = wf.canvas_nodes || [];
-  const hasGenerator = nodes.some((n: any) => n.type === 'generator');
-  const hasPrompt = nodes.some((n: any) => n.type === 'prompt');
-  const imageNodes = nodes.filter((n: any) => n.type === 'image');
-
-  if (imageNodes.length >= 2) return 'two-image';
-  if (hasGenerator && !hasPrompt) return 'image-only';
-  if (hasGenerator && hasPrompt) return 'generic';
-
-  return 'generic';
 }
