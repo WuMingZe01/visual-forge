@@ -295,10 +295,13 @@ def get_exposed_fields(template: dict) -> list[dict]:
             if not isinstance(var_def, dict):
                 continue
             seen_names.add(var_name)
+            field_type = var_def.get("type", "text")
+            if field_type not in ("image", "text", "select", "number", "model_picker", "template_picker", "sku_lookup"):
+                field_type = "text"
             fields.append({
                 "name": var_name,
                 "label": var_def.get("label", var_name),
-                "type": var_def.get("type", "text"),
+                "type": field_type,
                 "required": var_def.get("required", False),
                 "default": var_def.get("default"),
                 "options": var_def.get("options", []),
