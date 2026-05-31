@@ -18,7 +18,7 @@ interface WorkflowTemplate {
   connection_count: number;
   canvas_nodes?: any[];
   canvas_connections?: any[];
-  generator_config?: Record<string, any>;
+  options?: Record<string, any>;
   exposed_fields?: ExposedField[];
 }
 
@@ -431,6 +431,25 @@ export function WorkflowRunner() {
                       {wf.description && (
                         <div className="text-xs opacity-60 mt-1 line-clamp-2">{wf.description}</div>
                       )}
+
+                      {/* Metadata badges */}
+                      <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                        {wf.options?.generateConcurrency != null && (
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-forge-cyan/10 text-forge-cyan">
+                            {wf.options.generateConcurrency > 1 ? `最大${wf.options.generateConcurrency}路并发` : '单路执行'}
+                          </span>
+                        )}
+                        {wf.node_count > 0 && (
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-forge-surface2 text-forge-text2">
+                            {wf.node_count}节点
+                          </span>
+                        )}
+                        {wf.stages && (
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-forge-surface2 text-forge-text2">
+                            {wf.stages.filter(s => s.enabled).length}/{wf.stages.length}阶段
+                          </span>
+                        )}
+                      </div>
 
                       {/* Action buttons */}
                       <div className="flex items-center gap-2 mt-2">

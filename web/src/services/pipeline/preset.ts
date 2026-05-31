@@ -67,7 +67,7 @@ export const POSE_BATCH_WORKFLOW: WorkflowConfig = {
     { id: 'finalize', enabled: true },
   ],
   options: {
-    generateConcurrency: 36,
+    generateConcurrency: 5,
     generateTimeoutMs: 480000,
     validateTimeoutMs: 30000,
     llmMaxConcurrency: 3,
@@ -87,7 +87,7 @@ export const DETAIL_BATCH_WORKFLOW: WorkflowConfig = {
     { id: 'finalize', enabled: true },
   ],
   options: {
-    generateConcurrency: 36,
+    generateConcurrency: 5,
     generateTimeoutMs: 480000,
     validateTimeoutMs: 30000,
     llmMaxConcurrency: 3,
@@ -135,6 +135,46 @@ export const PIPELINE_FULL_WORKFLOW: WorkflowConfig = {
 };
 
 // ===== 简易工作流（无LLM反推，无校验） =====
+
+// ===== AI智能反推生图工作流 =====
+
+export const AI_REVERSE_WORKFLOW: WorkflowConfig = {
+  name: 'AI智能反推生图',
+  description: '上传商品白底图+模特图 → LLM多模态分析 → 自动生成提示词 → 生图',
+  stages: [
+    { id: 'prepare', enabled: true },
+    { id: 'analyze', enabled: true, config: { useModelAnalysis: true, useProductAnalysis: true } },
+    { id: 'generate', enabled: true },
+    { id: 'validate', enabled: false },
+    { id: 'finalize', enabled: true },
+  ],
+  options: {
+    generateConcurrency: 1,
+    generateTimeoutMs: 180000,
+    validateTimeoutMs: 30000,
+    llmMaxConcurrency: 1,
+  },
+};
+
+// ===== 单图快速生图工作流 =====
+
+export const SINGLE_QUICK_WORKFLOW: WorkflowConfig = {
+  name: '单图快速生图',
+  description: '纯文本生图：只需输入提示词即可生成，无需参考图。1路并发。',
+  stages: [
+    { id: 'prepare', enabled: true },
+    { id: 'analyze', enabled: false },
+    { id: 'generate', enabled: true },
+    { id: 'validate', enabled: false },
+    { id: 'finalize', enabled: true },
+  ],
+  options: {
+    generateConcurrency: 1,
+    generateTimeoutMs: 120000,
+    validateTimeoutMs: 0,
+    llmMaxConcurrency: 0,
+  },
+};
 
 export const SIMPLE_BATCH_WORKFLOW: WorkflowConfig = {
   name: '简易批量生成',

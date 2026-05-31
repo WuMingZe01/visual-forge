@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Upload, X, Search, User, Layout, Package } from 'lucide-react';
 import { useModelStore } from '@/store/useModelStore';
 import { useTemplateStore } from '@/store/useTemplateStore';
+import { queryStyleByCode } from '@/services/lingmao';
 
 /* ── Types ─────────────────────────────────────────── */
 
@@ -49,14 +50,12 @@ export function DynamicTemplateForm({ fields, formData, onChange, loading }: Dyn
     if (!skuCode.trim()) return;
     setSkuLoading(true);
     try {
-      const res = await fetch(`/api/lingmao/style/${encodeURIComponent(skuCode.trim())}`);
-      if (res.ok) {
-        const data = await res.json();
-        setSkuResult(data);
-        // Auto-fill product info into form data
+      const result = await queryStyleByCode([skuCode.trim()]);
+      if (result.skuInfo) {
+        const data = result.skuInfo;
+        setSkuResult(data as any);
         const updates: Record<string, string> = {};
-        if (data.styleName) updates['product_name'] = data.styleName;
-        if (data.productImage) updates['product_image'] = data.productImage;
+        if (data.productName) updates['product_name'] = data.productName;
         onChange({ ...formData, ...updates });
       } else {
         setSkuResult({ error: '未找到该款号' });
@@ -209,7 +208,7 @@ export function DynamicTemplateForm({ fields, formData, onChange, loading }: Dyn
           </div>
           {skuResult && !skuResult.error && (
             <div className="mt-1 text-xs text-green-400 bg-green-500/5 rounded p-2">
-              已加载: {skuResult.styleName || skuCode}
+              已加载: {(skuResult as any).productName || skuCode}
             </div>
           )}
           {skuResult?.error && (

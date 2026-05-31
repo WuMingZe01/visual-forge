@@ -34,6 +34,8 @@ export {
   QUICK_GENERATE_WORKFLOW,
   PIPELINE_FULL_WORKFLOW,
   SIMPLE_BATCH_WORKFLOW,
+  AI_REVERSE_WORKFLOW,
+  SINGLE_QUICK_WORKFLOW,
 } from './preset';
 export type {
   PipelineContext,

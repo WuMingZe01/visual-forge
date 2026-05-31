@@ -6799,7 +6799,7 @@ def list_all_workflows():
             "canvas_connections": preset.get("canvas_connections", []),
             "exposed_mapping": preset.get("exposed_mapping", {}),
             "exposed_fields": get_exposed_fields(preset),
-            "generator_config": {},
+            "options": preset.get("options", {}),
         })
     # 画布保存的模板
     saved = _list_saved_workflows()
