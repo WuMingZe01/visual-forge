@@ -162,7 +162,7 @@ POSE_BATCH_WORKFLOW: dict = {
         {"id": "finalize", "enabled": True},
     ],
     "options": {
-        "generateConcurrency": 36,
+        "generateConcurrency": 5,
         "generateTimeoutMs": 480_000,
         "validateTimeoutMs": 30_000,
         "llmMaxConcurrency": 3,
@@ -180,6 +180,31 @@ POSE_BATCH_WORKFLOW: dict = {
         {"id": "c4", "from": "gen1",    "to": "output1"},
     ],
     "exposed_mapping": {
+        "sku_code": {
+            "node_id": "_sku_",
+            "path": ["sku"],
+            "label": "领猫款号查询",
+            "type": "sku_lookup",
+            "required": False,
+            "default": "",
+        },
+        "model_image": {
+            "node_id": "image1",
+            "path": ["url"],
+            "label": "模特参考图",
+            "type": "model_picker",
+            "required": False,
+            "default": "",
+        },
+        "style_template": {
+            "node_id": "_template_",
+            "path": ["template"],
+            "label": "姿势模板",
+            "type": "template_picker",
+            "options": ["pose"],
+            "required": False,
+            "default": "",
+        },
         "template_image": {
             "node_id": "image1",
             "path": ["url"],
@@ -248,7 +273,7 @@ DETAIL_BATCH_WORKFLOW: dict = {
         {"id": "finalize", "enabled": True},
     ],
     "options": {
-        "generateConcurrency": 36,
+        "generateConcurrency": 5,
         "generateTimeoutMs": 480_000,
         "validateTimeoutMs": 30_000,
         "llmMaxConcurrency": 3,
@@ -266,6 +291,31 @@ DETAIL_BATCH_WORKFLOW: dict = {
         {"id": "c4", "from": "gen1",   "to": "output1"},
     ],
     "exposed_mapping": {
+        "sku_code": {
+            "node_id": "_sku_",
+            "path": ["sku"],
+            "label": "领猫款号查询",
+            "type": "sku_lookup",
+            "required": False,
+            "default": "",
+        },
+        "model_image": {
+            "node_id": "image1",
+            "path": ["url"],
+            "label": "模特参考图",
+            "type": "model_picker",
+            "required": False,
+            "default": "",
+        },
+        "style_template": {
+            "node_id": "_template_",
+            "path": ["template"],
+            "label": "详情模板",
+            "type": "template_picker",
+            "options": ["detail"],
+            "required": False,
+            "default": "",
+        },
         "detail_image": {
             "node_id": "image1",
             "path": ["url"],
@@ -352,6 +402,14 @@ QUICK_GENERATE_WORKFLOW: dict = {
         {"id": "c4", "from": "gen1",    "to": "output1"},
     ],
     "exposed_mapping": {
+        "model_image": {
+            "node_id": "image1",
+            "path": ["url"],
+            "label": "模特参考图",
+            "type": "model_picker",
+            "required": False,
+            "default": "",
+        },
         "ref_image": {
             "node_id": "image1",
             "path": ["url"],
@@ -531,6 +589,22 @@ SIMPLE_BATCH_WORKFLOW: dict = {
         {"id": "c4", "from": "gen1",    "to": "output1"},
     ],
     "exposed_mapping": {
+        "sku_code": {
+            "node_id": "_sku_",
+            "path": ["sku"],
+            "label": "领猫款号查询",
+            "type": "sku_lookup",
+            "required": False,
+            "default": "",
+        },
+        "model_image": {
+            "node_id": "image1",
+            "path": ["url"],
+            "label": "模特参考图",
+            "type": "model_picker",
+            "required": False,
+            "default": "",
+        },
         "ref_image": {
             "node_id": "image1",
             "path": ["url"],
@@ -586,6 +660,186 @@ SIMPLE_BATCH_WORKFLOW: dict = {
 }
 
 
+# ===== AI智能反推生图工作流 =====
+
+AI_REVERSE_WORKFLOW: dict = {
+    "name": "AI智能反推生图",
+    "description": "上传商品白底图+模特图 → LLM多模态分析 → 自动生成提示词 → 生图。启用analyze阶段，适合需要AI智能生成提示词的场景。",
+    "stages": [
+        {"id": "prepare",  "enabled": True},
+        {"id": "analyze",  "enabled": True,  "config": {"useModelAnalysis": True, "useProductAnalysis": True}},
+        {"id": "generate", "enabled": True},
+        {"id": "validate", "enabled": False},
+        {"id": "finalize", "enabled": True},
+    ],
+    "options": {
+        "generateConcurrency": 1,
+        "generateTimeoutMs": 180_000,
+        "validateTimeoutMs": 30_000,
+        "llmMaxConcurrency": 1,
+    },
+    "canvas_nodes": [
+        {"id": "image1",   "type": "image",     "x": 100,  "y": 200, "name": "商品图/模特图", "url": "{{product_image}}"},
+        {"id": "llm1",     "type": "llm",       "x": 400,  "y": 200, "prompt": "分析商品特征和风格，生成详细的生图提示词", "model": "default", "w": 200, "h": 100},
+        {"id": "prompt1",  "type": "prompt",    "x": 700,  "y": 200, "text": "{{user_prompt}}"},
+        {"id": "gen1",     "type": "generator", "x": 1000, "y": 200, "apiProvider": "{{api_provider}}", "model": "{{model_id}}", "ratio": "{{aspect_ratio}}", "resolution": "{{resolution}}", "customRatio": "", "customSize": "", "inputs": []},
+        {"id": "output1",  "type": "output",    "x": 1300, "y": 200},
+    ],
+    "canvas_connections": [
+        {"id": "c1", "from": "image1",  "to": "llm1"},
+        {"id": "c2", "from": "llm1",    "to": "prompt1"},
+        {"id": "c3", "from": "prompt1", "to": "gen1"},
+        {"id": "c4", "from": "image1",  "to": "gen1"},
+        {"id": "c5", "from": "gen1",    "to": "output1"},
+    ],
+    "exposed_mapping": {
+        "sku_code": {
+            "node_id": "_sku_",
+            "path": ["sku"],
+            "label": "领猫款号查询",
+            "type": "sku_lookup",
+            "required": False,
+            "default": "",
+        },
+        "model_image": {
+            "node_id": "image1",
+            "path": ["url"],
+            "label": "模特参考图",
+            "type": "model_picker",
+            "required": False,
+            "default": "",
+        },
+        "product_image": {
+            "node_id": "image1",
+            "path": ["url"],
+            "label": "商品白底图",
+            "type": "image",
+            "required": True,
+        },
+        "user_prompt": {
+            "node_id": "prompt1",
+            "path": ["text"],
+            "label": "AI生成提示词（可手动修改）",
+            "type": "text",
+            "required": False,
+            "default": "专业商品摄影，白色背景，工作室灯光，高清8K",
+        },
+        "api_provider": {
+            "node_id": "gen1",
+            "path": ["apiProvider"],
+            "label": "生图引擎",
+            "type": "select",
+            "options": ["auto", "grsai", "yunwu"],
+            "required": False,
+            "default": "auto",
+        },
+        "model_id": {
+            "node_id": "gen1",
+            "path": ["model"],
+            "label": "AI模型",
+            "type": "select",
+            "options": ["gpt-image-2", "gpt-image-2-vip", "gpt-image-1-mini", "gpt-image-2-all"],
+            "required": False,
+            "default": "gpt-image-2",
+        },
+        "aspect_ratio": {
+            "node_id": "gen1",
+            "path": ["ratio"],
+            "label": "出图比例",
+            "type": "select",
+            "options": ["1:1 (淘宝主图)", "3:4 (小红书)", "9:16 (手机)", "4:3 (PC端)", "16:9 (宽屏)"],
+            "required": False,
+            "default": "1:1 (淘宝主图)",
+        },
+        "resolution": {
+            "node_id": "gen1",
+            "path": ["resolution"],
+            "label": "画质/尺寸",
+            "type": "select",
+            "options": ["1K (1024px·快速)", "2K (2048px·推荐)", "4K (4096px·高清)"],
+            "required": False,
+            "default": "2K (2048px·推荐)",
+        },
+    },
+}
+
+
+# ===== 单图快速生图工作流（无参考图） =====
+
+SINGLE_QUICK_WORKFLOW: dict = {
+    "name": "单图快速生图",
+    "description": "纯文本生图：只需输入提示词即可生成，无需参考图。1路并发，适合快速出图验证。",
+    "stages": [
+        {"id": "prepare",  "enabled": True},
+        {"id": "analyze",  "enabled": False},
+        {"id": "generate", "enabled": True},
+        {"id": "validate", "enabled": False},
+        {"id": "finalize", "enabled": True},
+    ],
+    "options": {
+        "generateConcurrency": 1,
+        "generateTimeoutMs": 120_000,
+        "validateTimeoutMs": 0,
+        "llmMaxConcurrency": 0,
+    },
+    "canvas_nodes": [
+        {"id": "prompt1",  "type": "prompt",    "x": 300,  "y": 200, "text": "{{user_prompt}}"},
+        {"id": "gen1",     "type": "generator", "x": 600,  "y": 200, "apiProvider": "{{api_provider}}", "model": "{{model_id}}", "ratio": "{{aspect_ratio}}", "resolution": "{{resolution}}", "customRatio": "", "customSize": "", "inputs": []},
+        {"id": "output1",  "type": "output",    "x": 900,  "y": 200},
+    ],
+    "canvas_connections": [
+        {"id": "c1", "from": "prompt1", "to": "gen1"},
+        {"id": "c2", "from": "gen1",    "to": "output1"},
+    ],
+    "exposed_mapping": {
+        "user_prompt": {
+            "node_id": "prompt1",
+            "path": ["text"],
+            "label": "生图提示词",
+            "type": "text",
+            "required": True,
+            "default": "专业商品摄影，白色背景，工作室灯光，高清8K",
+        },
+        "api_provider": {
+            "node_id": "gen1",
+            "path": ["apiProvider"],
+            "label": "生图引擎",
+            "type": "select",
+            "options": ["auto", "grsai", "yunwu"],
+            "required": False,
+            "default": "auto",
+        },
+        "model_id": {
+            "node_id": "gen1",
+            "path": ["model"],
+            "label": "AI模型",
+            "type": "select",
+            "options": ["gpt-image-2", "gpt-image-2-vip", "gpt-image-1-mini", "gpt-image-2-all"],
+            "required": False,
+            "default": "gpt-image-2",
+        },
+        "aspect_ratio": {
+            "node_id": "gen1",
+            "path": ["ratio"],
+            "label": "出图比例",
+            "type": "select",
+            "options": ["1:1 (淘宝主图)", "3:4 (小红书)", "9:16 (手机)", "4:3 (PC端)", "16:9 (宽屏)"],
+            "required": False,
+            "default": "1:1 (淘宝主图)",
+        },
+        "resolution": {
+            "node_id": "gen1",
+            "path": ["resolution"],
+            "label": "画质/尺寸",
+            "type": "select",
+            "options": ["1K (1024px·快速)", "2K (2048px·推荐)", "4K (4096px·高清)"],
+            "required": False,
+            "default": "2K (2048px·推荐)",
+        },
+    },
+}
+
+
 # 按名称索引的预设表，方便运行时按名称查找工作流
 WORKFLOW_PRESETS: dict[str, dict] = {
     presets["name"]: presets  # type: ignore[has-type]
@@ -596,5 +850,7 @@ WORKFLOW_PRESETS: dict[str, dict] = {
         QUICK_GENERATE_WORKFLOW,
         PIPELINE_FULL_WORKFLOW,
         SIMPLE_BATCH_WORKFLOW,
+        AI_REVERSE_WORKFLOW,
+        SINGLE_QUICK_WORKFLOW,
     ]
 }
