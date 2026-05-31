@@ -65,7 +65,8 @@ MAIN_BATCH_WORKFLOW: dict = {
         {"id": "c1", "from": "image1",  "to": "llm1"},
         {"id": "c2", "from": "llm1",    "to": "prompt1"},
         {"id": "c3", "from": "prompt1", "to": "gen1"},
-        {"id": "c4", "from": "gen1",    "to": "output1"},
+        {"id": "c4", "from": "image1",  "to": "gen1"},
+        {"id": "c5", "from": "gen1",    "to": "output1"},
     ],
     "exposed_mapping": {
         "product_image": {
@@ -150,7 +151,8 @@ POSE_BATCH_WORKFLOW: dict = {
     "canvas_connections": [
         {"id": "c1", "from": "image1",  "to": "prompt1"},
         {"id": "c2", "from": "prompt1", "to": "gen1"},
-        {"id": "c3", "from": "gen1",    "to": "output1"},
+        {"id": "c3", "from": "image1",  "to": "gen1"},
+        {"id": "c4", "from": "gen1",    "to": "output1"},
     ],
     "exposed_mapping": {
         "template_image": {
@@ -235,7 +237,8 @@ DETAIL_BATCH_WORKFLOW: dict = {
     "canvas_connections": [
         {"id": "c1", "from": "image1", "to": "prompt1"},
         {"id": "c2", "from": "prompt1", "to": "gen1"},
-        {"id": "c3", "from": "gen1",   "to": "output1"},
+        {"id": "c3", "from": "image1", "to": "gen1"},
+        {"id": "c4", "from": "gen1",   "to": "output1"},
     ],
     "exposed_mapping": {
         "detail_image": {
@@ -320,7 +323,8 @@ QUICK_GENERATE_WORKFLOW: dict = {
     "canvas_connections": [
         {"id": "c1", "from": "image1",  "to": "prompt1"},
         {"id": "c2", "from": "prompt1", "to": "gen1"},
-        {"id": "c3", "from": "gen1",    "to": "output1"},
+        {"id": "c3", "from": "image1",  "to": "gen1"},
+        {"id": "c4", "from": "gen1",    "to": "output1"},
     ],
     "exposed_mapping": {
         "ref_image": {
@@ -409,11 +413,11 @@ PIPELINE_FULL_WORKFLOW: dict = {
     "canvas_connections": [
         {"id": "c1", "from": "image1",  "to": "llm1"},
         {"id": "c2", "from": "llm1",    "to": "prompt1"},
-        {"id": "c3", "from": "prompt1", "to": "gen1"},
-        {"id": "c4", "from": "prompt1", "to": "gen2"},
-        {"id": "c5", "from": "gen1",    "to": "gen3"},
-        {"id": "c6", "from": "gen2",    "to": "gen3"},
-        {"id": "c7", "from": "gen3",    "to": "output1"},
+        {"id": "c5", "from": "image1",  "to": "gen1"},
+        {"id": "c6", "from": "image1",  "to": "gen2"},
+        {"id": "c7", "from": "gen1",    "to": "gen3"},
+        {"id": "c8", "from": "gen2",    "to": "gen3"},
+        {"id": "c9", "from": "gen3",    "to": "output1"},
     ],
     "exposed_mapping": {
         "product_image": {
@@ -498,7 +502,8 @@ SIMPLE_BATCH_WORKFLOW: dict = {
     "canvas_connections": [
         {"id": "c1", "from": "image1",  "to": "prompt1"},
         {"id": "c2", "from": "prompt1", "to": "gen1"},
-        {"id": "c3", "from": "gen1",    "to": "output1"},
+        {"id": "c3", "from": "image1",  "to": "gen1"},
+        {"id": "c4", "from": "gen1",    "to": "output1"},
     ],
     "exposed_mapping": {
         "ref_image": {
