@@ -73,16 +73,37 @@ export function WorkflowRunner() {
     lines.push(`任务: ${task.workflow_name}`);
     lines.push(`状态: ${task.status}`);
     lines.push(`耗时: ${task.duration_seconds?.toFixed(1)}s`);
-    lines.push(`入参: ${JSON.stringify((task as any).dynamic_inputs || {}, null, 2)}`);
+    // Sanitize inputs: truncate base64 data
+    const rawInputs = (task as any).dynamic_inputs || {};
+    const safeInputs: Record<string, string> = {};
+    for (const [k, v] of Object.entries(rawInputs)) {
+      if (typeof v === 'string' && v.startsWith('data:')) {
+        safeInputs[k] = `[base64 image, ${v.length} chars]`;
+      } else if (typeof v === 'string' && v.length > 200) {
+        safeInputs[k] = v.slice(0, 200) + '...';
+      } else {
+        safeInputs[k] = v as string;
+      }
+    }
+    lines.push(`入参: ${JSON.stringify(safeInputs, null, 2)}`);
     lines.push('');
+    // Node trace
+    const nt = (task as any).node_trace;
+    if (nt) {
+      lines.push('节点执行:');
+      for (const [nid, info] of Object.entries(nt) as any) {
+        const preview = info?.result_preview?.join(', ') || (info?.has_result ? '(result)' : '(pending)');
+        lines.push(`  [${nid}] ${info.node_type}: ${preview}`);
+      }
+      lines.push('');
+    }
+    // Image URLs only
+    lines.push('生成结果:');
     const rr = task.result?.row_results;
     if (rr) {
       for (const [nid, val] of Object.entries(rr) as any) {
-        const urls = val?.urls || [];
-        if (urls.length > 0) {
-          for (const u of urls) {
-            if (u.startsWith('http')) lines.push(`[${nid}] ${u}`);
-          }
+        for (const u of (val?.urls || [])) {
+          if (u.startsWith('http')) lines.push(`  ${u}`);
         }
       }
     }
@@ -494,32 +515,46 @@ export function WorkflowRunner() {
 
           {/* Current task status */}
           {currentTask && (
-            <div className="glass-card p-4 space-y-3">
+            <div className="glass-card p-4 space-y-4">
+              {/* ── Header ── */}
               <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-forge-text flex items-center gap-2">
-                  {statusIcon(currentTask.status)} {currentTask.workflow_name}
-                </h3>
-                <span className={`px-2 py-0.5 rounded text-xs ${
-                  currentTask.status === 'completed' ? 'bg-green-500/10 text-green-400' :
-                  currentTask.status === 'failed' ? 'bg-red-500/10 text-red-400' :
-                  'bg-forge-cyan/10 text-forge-cyan'
-                }`}>
-                  {currentTask.status}
-                </span>
+                <div className="flex items-center gap-2">
+                  {statusIcon(currentTask.status)}
+                  <h3 className="text-sm font-semibold text-forge-text">{currentTask.workflow_name}</h3>
+                  {currentTask.duration_seconds != null && (
+                    <span className="text-xs text-forge-text2">{currentTask.duration_seconds.toFixed(1)}s</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleCopyResult(currentTask)}
+                    className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-forge-surface2 text-forge-text2 hover:text-forge-cyan transition-colors"
+                  >
+                    {copied ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+                    {copied ? '已复制' : '一键复制'}
+                  </button>
+                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                    currentTask.status === 'completed' ? 'bg-green-500/10 text-green-400' :
+                    currentTask.status === 'failed' ? 'bg-red-500/10 text-red-400' :
+                    'bg-forge-cyan/10 text-forge-cyan'
+                  }`}>
+                    {currentTask.status === 'completed' ? '已完成' : currentTask.status === 'failed' ? '失败' : currentTask.status === 'running' ? '运行中' : currentTask.status}
+                  </span>
+                </div>
               </div>
 
-              {/* Stage progress */}
+              {/* ── Stage progress ── */}
               {currentTask.enabled_stages && currentTask.enabled_stages.length > 0 && (
-                <div className="flex items-center gap-1 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap">
                   {currentTask.enabled_stages.map((stage, i) => {
                     const isActive = running && activeStageIdx === i;
                     const isDone = running && activeStageIdx > i;
                     const isComplete = currentTask.status === 'completed';
                     return (
                       <div key={stage} className="flex items-center gap-1">
-                        <span className={`px-2 py-0.5 rounded text-xs transition-all duration-300 ${
+                        <span className={`px-2 py-1 rounded text-xs transition-all ${
                           isComplete ? 'bg-green-500/10 text-green-400' :
-                          isActive ? 'bg-forge-cyan/20 text-forge-cyan animate-pulse scale-105' :
+                          isActive ? 'bg-forge-cyan/20 text-forge-cyan' :
                           isDone ? 'bg-green-500/10 text-green-400' :
                           'bg-forge-surface2 text-forge-text2'
                         }`}>
@@ -527,61 +562,89 @@ export function WorkflowRunner() {
                           {stageLabel(stage)}
                         </span>
                         {i < currentTask.enabled_stages.length - 1 && (
-                          <ChevronRight size={12} className={`transition-colors ${
-                            isDone ? 'text-green-400' : isActive ? 'text-forge-cyan' : 'text-forge-text2/40'
-                          }`} />
+                          <ChevronRight size={12} className="text-forge-text2/40" />
                         )}
                       </div>
                     );
                   })}
+                  {running && (
+                    <div className="flex-1 h-1.5 bg-forge-surface2 rounded-full overflow-hidden min-w-[60px]">
+                      <div className="h-full bg-gradient-to-r from-forge-cyan to-purple-500 rounded-full transition-all duration-1000"
+                        style={{ width: `${Math.min(95, ((activeStageIdx + 1) / Math.max(1, (currentTask.enabled_stages || []).length)) * 100)}%` }} />
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* Progress bar */}
-              {running && (
-                <div className="w-full h-1.5 bg-forge-surface2 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-forge-cyan to-purple-500 rounded-full transition-all duration-1000"
-                    style={{
-                      width: `${Math.min(95, ((activeStageIdx + 1) / Math.max(1, (currentTask.enabled_stages || []).length)) * 100)}%`
-                    }}
-                  />
-                </div>
-              )}
-
+              {/* ── Error ── */}
               {currentTask.error && (
-                <div className="text-red-400 text-xs bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+                <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-3">
                   <div className="flex items-start gap-2">
                     <AlertCircle size={14} className="shrink-0 mt-0.5 text-red-400" />
-                    <pre className="flex-1 whitespace-pre-wrap text-xs leading-relaxed max-h-48 overflow-y-auto">{currentTask.error}</pre>
+                    <pre className="flex-1 whitespace-pre-wrap text-xs text-red-400 leading-relaxed max-h-48 overflow-y-auto">{currentTask.error}</pre>
                   </div>
                 </div>
               )}
 
-              {currentTask.duration_seconds != null && (
-                <div className="text-xs text-forge-text2">耗时: {currentTask.duration_seconds.toFixed(1)}s</div>
+              {/* ════ INPUT PARAMETERS ════ */}
+              {(currentTask as any).dynamic_inputs && Object.keys((currentTask as any).dynamic_inputs).length > 0 && (
+                <div className="rounded-lg bg-forge-surface2/50 border border-forge-border/30 p-3">
+                  <h4 className="text-xs font-semibold text-forge-text mb-2 flex items-center gap-1.5">
+                    <Zap size={12} className="text-forge-cyan" /> 入参
+                  </h4>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                    {Object.entries((currentTask as any).dynamic_inputs).map(([key, value]: [string, any]) => (
+                      <div key={key} className="flex items-baseline gap-1 text-xs">
+                        <span className="text-forge-text2 shrink-0">{key}:</span>
+                        <span className="text-forge-text truncate font-mono">
+                          {typeof value === 'string' && value.length > 80
+                            ? `[base64, ${value.length} chars]`
+                            : (value || '(空)')}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
 
-              {/* Results */}
-              {currentTask.status === 'completed' && currentTask.result && (
-                <div className="mt-2 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-xs font-semibold text-forge-text">执行结果</h4>
-                    <button
-                      onClick={() => handleCopyResult(currentTask)}
-                      className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-forge-surface2 text-forge-text2 hover:text-forge-cyan transition-colors"
-                    >
-                      {copied ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
-                      {copied ? '已复制' : '一键复制'}
-                    </button>
+              {/* ════ NODE TRACE ════ */}
+              {(currentTask as any).node_trace && Object.keys((currentTask as any).node_trace).length > 0 && (
+                <div className="rounded-lg bg-forge-surface2/50 border border-forge-border/30 p-3">
+                  <h4 className="text-xs font-semibold text-forge-text mb-2 flex items-center gap-1.5">
+                    <Workflow size={12} className="text-forge-cyan" /> 节点执行追踪
+                  </h4>
+                  <div className="space-y-1.5">
+                    {Object.entries((currentTask as any).node_trace).map(([nid, info]: [string, any]) => (
+                      <div key={nid} className="flex items-start gap-2 text-xs">
+                        <span className={`shrink-0 w-1.5 h-1.5 rounded-full mt-1.5 ${
+                          info.has_result ? 'bg-green-400' : info.error ? 'bg-red-400' : 'bg-forge-text2'
+                        }`} />
+                        <span className="text-forge-text2 font-mono shrink-0 w-20 truncate">{nid}</span>
+                        <span className="text-forge-text2 shrink-0 bg-forge-surface2 px-1 rounded text-[10px]">{info.node_type}</span>
+                        <span className="text-forge-text truncate">
+                          {info.error
+                            ? <span className="text-red-400">{info.error}</span>
+                            : info.result_preview?.join(', ') || '(pending)'}
+                        </span>
+                      </div>
+                    ))}
                   </div>
+                </div>
+              )}
+
+              {/* ════ RESULTS ════ */}
+              {currentTask.status === 'completed' && currentTask.result && (
+                <div className="rounded-lg bg-forge-surface2/50 border border-forge-border/30 p-3">
+                  <h4 className="text-xs font-semibold text-forge-text mb-2 flex items-center gap-1.5">
+                    <ImageIcon size={12} className="text-forge-cyan" /> 生成结果
+                  </h4>
                   {currentTask.result.row_results ? (
                     <div className="space-y-2">
                       {Object.entries(currentTask.result.row_results)
                         .filter(([_, val]: [string, any]) => (val?.urls || []).some((u: string) => u.startsWith('http')))
                         .map(([nid, val]: [string, any]) => (
                           <div key={nid} className="space-y-1">
-                            <div className="text-xs text-forge-text2 font-mono">{nid}</div>
+                            <div className="text-[10px] text-forge-text2 font-mono">{nid} ({val.node_type || 'generator'})</div>
                             <div className="grid grid-cols-2 gap-1">
                               {val.urls.filter((u: string) => u.startsWith('http')).map((u: string, i: number) => (
                                 <img key={i} src={u} alt={`${nid}-${i}`} className="w-full rounded border border-forge-border object-contain" />
@@ -593,7 +656,7 @@ export function WorkflowRunner() {
                   ) : currentTask.result.images ? (
                     <div className="grid grid-cols-2 gap-2">
                       {currentTask.result.images.map((img: string, i: number) => (
-                        <img key={i} src={img} alt={`result-${i}`} className="w-full rounded-lg border border-forge-border object-contain" />
+                        <img key={i} src={img} alt={`r-${i}`} className="w-full rounded border border-forge-border object-contain" />
                       ))}
                     </div>
                   ) : (
